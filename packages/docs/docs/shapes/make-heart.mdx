@@ -1,0 +1,45 @@
+---
+image: https://remotion.media/docs/generated/articles-docs-shapes-make-heart.png
+title: makeHeart()
+crumb: '@remotion/shapes'
+---
+
+import {MakeShapeSeeAlso, ShapeOptions, MakeShapeReturnType} from '../../components/shapes/shapes-info';
+
+# makeHeart()<AvailableFrom v="4.0.315" />
+
+_Part of the [`@remotion/shapes`](/docs/shapes) package._
+
+Generates an SVG path for a heart.
+
+## Example
+
+```ts twoslash title="make-heart.ts"
+import {makeHeart} from '@remotion/shapes';
+
+const {path, width, height, transformOrigin, instructions} = makeHeart({
+  height: 100,
+});
+
+console.log(path); // M 55.00000000000001 100 C 32.00000000000001 69 0 60 0 25 C 0 13 13.000000000000004 0 27.500000000000004 0 C 42 0 50.00000000000001 7.000000000000001 55.00000000000001 17 C 60.00000000000001 7.000000000000001 70 0 82.50000000000001 0 C 97.00000000000001 0 110.00000000000001 13 110.00000000000001 25 C 110.00000000000001 60 78 69 55.00000000000001 100 Z
+console.log(width); // 110.00000000000001
+console.log(height); // 100
+console.log(transformOrigin); // '55.00000000000001 50'
+console.log(instructions); // Instruction[]
+```
+
+## Arguments
+
+<ShapeOptions shape="heart" />
+
+## Return type
+
+<MakeShapeReturnType shape="heart"/>
+
+## Compatibility
+
+<CompatibilityTable chrome firefox safari nodejs bun serverlessFunctions clientSideRendering serverSideRendering player studio />
+
+## See also
+
+<MakeShapeSeeAlso shape="heart" />

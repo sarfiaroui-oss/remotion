@@ -1,0 +1,48 @@
+---
+image: https://remotion.media/docs/generated/articles-docs-preload-preload-font.png
+id: preload-font
+slug: preload-font
+title: "preloadFont()"
+crumb: "@remotion/preload"
+---
+
+_This function is part of the [`@remotion/preload`](/docs/preload) package._
+
+This function preloads a font so that text using it can display immediately.
+
+While preload is not necessary for rendering, it can help with seamless playback in the [`<Player>`](/docs/player/player) and in the Studio.
+
+An alternative to `preloadFont()` is the [`prefetch()`](/docs/prefetch) API. See [`@remotion/preload` vs `prefetch()`](/docs/player/preloading#remotionpreload-vs-prefetch) to decide which one is better for your usecase.
+
+## Usage
+
+```tsx twoslash
+import { preloadFont } from "@remotion/preload";
+
+const unpreload = preloadFont(
+  "https://fonts.gstatic.com/s/roboto/v30/KFOlCnqEu92Fr1MmYUtfBxc4AMP6lbBP.woff2"
+);
+
+// If you want to un-preload the font later
+unpreload();
+```
+
+## How it works
+
+A `<link rel="preload" as="font">` tag gets added to the head element of the document.
+
+## Handle redirects
+
+`preloadFont()` resolves redirects automatically. It first fetches the URL to determine the final URL after any redirects, and then preloads the final URL.
+
+This requires the resource to support CORS. If the URL cannot be fetched, for example because the resource does not support CORS or the request times out, nothing gets preloaded and the error is logged to the console.
+
+To obtain the final URL yourself, use [`resolveRedirect()`](/docs/preload/resolve-redirect).
+
+## Compatibility
+
+<CompatibilityTable chrome firefox safari nodejs="" bun="" serverlessFunctions="" clientSideRendering serverSideRendering player studio hideServers />
+
+## See also
+
+- [Source code for this function](https://github.com/remotion-dev/remotion/blob/main/packages/preload/src/preload-font.ts)

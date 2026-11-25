@@ -1,0 +1,191 @@
+---
+image: https://remotion.media/docs/generated/articles-docs-captions-displaying.png
+sidebar_label: Displaying
+title: Displaying captions
+crumb: Captions
+---
+
+# Displaying captions
+
+See [importing](/docs/captions/importing) and [transcribing](/docs/captions/transcribing) captions first to see how to produce captions.
+
+Once you have captions to work with, you are free to render captions as you like by using React:
+
+```tsx twoslash title="Render the current word"
+import type {Caption} from '@remotion/captions';
+import {useCurrentFrame, useVideoConfig} from 'remotion';
+
+const captions: Caption[] = [
+  {
+    text: 'Hello there.',
+    startMs: 0,
+    endMs: 1000,
+    timestampMs: null,
+    confidence: null,
+  },
+  {
+    text: 'Welcome to the demo.',
+    startMs: 1000,
+    endMs: 2500,
+    timestampMs: null,
+    confidence: null,
+  },
+];
+
+export const SimpleCaptions = () => {
+  const frame = useCurrentFrame();
+  const {fps} = useVideoConfig();
+  const timeMs = (frame / fps) * 1000;
+  const caption = captions.find(({startMs, endMs}) => startMs <= timeMs && timeMs < endMs);
+
+  if (!caption) {
+    return null;
+  }
+
+  return (
+    <div
+      style={{
+        position: 'absolute',
+        left: 0,
+        right: 0,
+        bottom: 64,
+        color: 'white',
+        fontSize: 48,
+        textAlign: 'center',
+        textShadow: '0 2px 8px black',
+      }}
+    >
+      {caption.text}
+    </div>
+  );
+};
+```
+
+## Make captions editable in Studio<AvailableFrom v="4.0.536" />
+
+Use [`Interactive.create()`](/docs/interactive-create) with [`Interactive.captionsSchema`](/docs/interactivity-schema#interactivecaptionsschema) to declare your component as one that displays captions.
+
+- In the [Studio](/docs/studio), captions will appear as orange layers and show the transcript.
+- You can click captions to select them.
+- In the inspector, you can edit the transcript.
+- You can retime, and move the captions.
+
+```tsx twoslash title="Captions.tsx"
+import type {Caption} from '@remotion/captions';
+import {Interactive, useCurrentFrame, useVideoConfig} from 'remotion';
+
+const CaptionsInner = ({captions}: {readonly captions: Caption[]}) => {
+  const frame = useCurrentFrame();
+  const {fps} = useVideoConfig();
+  const timeMs = (frame / fps) * 1000;
+  const caption = captions.find(({startMs, endMs}) => startMs <= timeMs && timeMs < endMs);
+
+  if (!caption) {
+    return null;
+  }
+
+  return (
+    <div
+      style={{
+        position: 'absolute',
+        left: 48,
+        right: 48,
+        bottom: 64,
+        color: 'white',
+        fontSize: 48,
+        textAlign: 'center',
+        textShadow: '0 2px 8px black',
+        whiteSpace: 'pre-wrap',
+      }}
+    >
+      {caption.text}
+    </div>
+  );
+};
+
+export const Captions = Interactive.create({
+  Component: CaptionsInner,
+  layout: 'absolute-fill',
+  schema: Interactive.captionsSchema,
+});
+```
+
+## Splitting and changing speed of clips
+
+We recommend the following best practices for your markup:
+
+- Directly inline the captions in your React markup, making it editable in the Studio.
+- Put the captions layer adjacent to the video or audio it belongs to and wrap both in another component using [`Interactive.create()`](/docs/interactive-create).
+- Trim, split and adjust the speed of your clips only on the outer instance.  
+  This keeps the captions in sync with the media and avoids duplicating the transcript.
+
+This example shows how a scene is split into multiple clips, which have different speeds.  
+The captions remain in sync with the video and have a single source of truth.
+
+In addition, [`<Track>`](/docs/track) is being used to keep the clips on the same timeline row.
+
+```tsx twoslash title="CaptionedVideo.tsx"
+// @filename: Captions.tsx
+import type {Caption} from '@remotion/captions';
+import type {ComponentType} from 'react';
+
+export declare const Captions: ComponentType<{readonly name: string; readonly captions: Caption[]}>;
+
+// @filename: CaptionedVideo.tsx
+// ---cut---
+import {Video} from '@remotion/media';
+import {Interactive, staticFile, Track, useVideoConfig} from 'remotion';
+import {Captions} from './Captions';
+
+const CaptionedVideoInner = () => (
+  <>
+    <Video name="Footage" src={staticFile('video.mp4')} />
+    <Captions
+      name="Captions"
+      captions={[
+        {
+          text: 'Hello there.',
+          startMs: 2000,
+          endMs: 3000,
+          timestampMs: null,
+          confidence: null,
+        },
+        {
+          text: 'Welcome to the demo.',
+          startMs: 3000,
+          endMs: 5000,
+          timestampMs: null,
+          confidence: null,
+        },
+      ]}
+    />
+  </>
+);
+
+const CaptionedVideo = Interactive.create({
+  Component: CaptionedVideoInner,
+  layout: 'absolute-fill',
+});
+
+export const MyComposition = () => {
+  const {fps} = useVideoConfig();
+
+  return (
+    <Track name="Captioned clips">
+      <CaptionedVideo name="First cut" trimBefore={2 * fps} durationInFrames={3 * fps} />
+      <CaptionedVideo
+        name="Faster repeat"
+        from={3 * fps}
+        trimBefore={2 * fps}
+        durationInFrames={3 * fps}
+        playbackRate={1.5}
+      />
+    </Track>
+  );
+};
+```
+
+## Next steps
+
+- [Styling captions](/docs/captions/styling) to change how captions look on screen.
+- [Editing captions](/docs/captions/editing) to correct text and adjust page breaks.

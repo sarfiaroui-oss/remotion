@@ -1,0 +1,2022 @@
+import {fileURLToPath} from 'node:url';
+import {
+	expect,
+	test,
+	type FrameLocator,
+	type Locator,
+	type Page,
+} from '@playwright/test';
+import {
+	createElementPayload,
+	staticFileRef,
+	StudioProtocolInternals,
+} from '@remotion/studio-protocol';
+import type {BrowserStudioOperations} from '@remotion/studio-shared';
+import {strFromU8, unzipSync} from 'fflate';
+import {captureTrackDropFailureEvidence} from './track-drop-failure-evidence';
+import {isTrackDropPreviewAboveRuler} from './track-drop-paint-order';
+
+const localImagePath = fileURLToPath(
+	new URL('../../agent-plugin/assets/logo.png', import.meta.url),
+);
+const localVideoPath = fileURLToPath(
+	new URL('../../example/public/framer.webm', import.meta.url),
+);
+
+const dropLocalFile = async ({
+	filePath,
+	page,
+	target,
+}: {
+	filePath: string;
+	page: Page;
+	target: Locator;
+}) => {
+	await target.scrollIntoViewIfNeeded();
+	const box = await target.boundingBox();
+	if (box === null) {
+		throw new Error('remotion.new drop target has no bounding box');
+	}
+
+	const client = await page.context().newCDPSession(page);
+	const dragData = {
+		dragOperationsMask: 1,
+		files: [filePath],
+		items: [],
+	};
+	const coordinates = {x: box.x + box.width / 2, y: box.y + box.height / 2};
+	await client.send('Input.dispatchDragEvent', {
+		...coordinates,
+		data: dragData,
+		type: 'dragEnter',
+	});
+	await client.send('Input.dispatchDragEvent', {
+		...coordinates,
+		data: dragData,
+		type: 'dragOver',
+	});
+	await client.send('Input.dispatchDragEvent', {
+		...coordinates,
+		data: dragData,
+		type: 'drop',
+	});
+};
+
+const waitForBrowserStudioOperations = async (studio: FrameLocator) => {
+	await expect
+		.poll(() =>
+			studio.locator('body').evaluate(() =>
+				Boolean(
+					(
+						window as typeof window & {
+							remotion_browserStudio?: unknown;
+						}
+					).remotion_browserStudio,
+				),
+			),
+		)
+		.toBe(true);
+};
+
+test('selects a composition inserted from the Add composition dialog', async ({
+	page,
+}) => {
+	await page.goto('/');
+	const studio = page.frameLocator('iframe');
+	const composition = studio.locator('[data-compname="MyComp"]');
+	await expect(composition).toBeVisible();
+	await studio.getByRole('button', {name: 'More composition actions'}).click();
+	await studio
+		.getByRole('button', {name: 'New composition...', exact: true})
+		.click();
+	await studio.getByPlaceholder('Composition ID').fill('MyComp1');
+	await studio.getByRole('button', {name: /^Add to /}).click();
+	await expect(studio.locator('[data-compname="MyComp1"]')).toBeVisible();
+
+	await page.goBack();
+	await expect.poll(() => new URL(page.url()).search).toBe('?/MyComp');
+	const expandRightSidebar = studio.getByRole('button', {
+		name: 'Expand right sidebar',
+	});
+	if (await expandRightSidebar.isVisible()) {
+		await expandRightSidebar.click();
+	}
+
+	await studio.getByRole('button', {name: 'Add composition...'}).click();
+	await studio.getByPlaceholder('Search compositions...').fill('MyComp1');
+	await page.keyboard.press('Enter');
+
+	await expect
+		.poll(() =>
+			page.evaluate(() => {
+				const browserWindow = window as typeof window & {
+					__browserStudioProject: {files: Record<string, string>};
+				};
+				return browserWindow.__browserStudioProject.files[
+					'/project/src/Composition.tsx'
+				];
+			}),
+		)
+		.toContain('name="MyComp1"');
+	const insertedComposition = studio
+		.locator('[data-timeline-marquee-item]')
+		.first();
+	await expect(insertedComposition).toHaveCSS('opacity', '1');
+});
+
+test('loads remotion.new, opens external links, and can add, delete, and duplicate', async ({
+	page,
+}) => {
+	const pageErrors: Error[] = [];
+	const remoteRemotionRequests: string[] = [];
+	const studioApiRequests: string[] = [];
+	const vendorBundleRequests: string[] = [];
+	const workspacePackageRequests: string[] = [];
+	let vendorBundleStartedBeforeIframe = false;
+	let rejectPageError: (error: Error) => void = () => undefined;
+	let markVendorBundleRequestStarted: () => void = () => undefined;
+	let releaseVendorBundleRequest: () => void = () => undefined;
+	const pageError = new Promise<never>((_resolve, reject) => {
+		rejectPageError = reject;
+	});
+	const vendorBundleRequestStarted = new Promise<void>((resolve) => {
+		markVendorBundleRequestStarted = resolve;
+	});
+	const waitBeforeServingVendorBundle = new Promise<void>((resolve) => {
+		releaseVendorBundleRequest = resolve;
+	});
+	const client = await page.context().newCDPSession(page);
+	await client.send('Network.enable');
+	await client.send('Network.emulateNetworkConditions', {
+		downloadThroughput: 10 * 1024 * 1024,
+		latency: 0,
+		offline: false,
+		uploadThroughput: 10 * 1024 * 1024,
+	});
+	page.on('request', (request) => {
+		const requestUrl = new URL(request.url());
+		if (requestUrl.searchParams.has('browserStudioVendor')) {
+			vendorBundleRequests.push(request.url());
+			vendorBundleStartedBeforeIframe = page.frames().length === 1;
+		}
+
+		if (
+			requestUrl.pathname.startsWith('/api/') &&
+			requestUrl.origin === new URL(page.url()).origin
+		) {
+			studioApiRequests.push(requestUrl.pathname);
+		}
+
+		if (
+			requestUrl.pathname.startsWith('/__remotion_browser_studio_workspace__/')
+		) {
+			workspacePackageRequests.push(requestUrl.pathname);
+		}
+
+		if (
+			requestUrl.hostname === 'esm.sh' &&
+			(decodeURIComponent(requestUrl.pathname).includes('/@remotion/') ||
+				/^\/remotion(?:@|\/|$)/.test(requestUrl.pathname))
+		) {
+			remoteRemotionRequests.push(request.url());
+		}
+	});
+	page.on('pageerror', (error) => {
+		pageErrors.push(error);
+		rejectPageError(error);
+	});
+	await page.context().route('https://remotion.dev/**', async (route) => {
+		await route.fulfill({body: 'About Remotion', contentType: 'text/html'});
+	});
+	await page.context().route(/\.mjs\?browserStudioVendor$/, async (route) => {
+		markVendorBundleRequestStarted();
+		await waitBeforeServingVendorBundle;
+		await route.continue();
+	});
+
+	await Promise.race([
+		(async () => {
+			await page.goto('/', {waitUntil: 'commit'});
+			await vendorBundleRequestStarted;
+			const loadingProgress = page.getByRole('progressbar', {
+				name: 'Loading Studio',
+			});
+			await expect(loadingProgress).toBeVisible({timeout: 5000});
+			await expect(page.getByText('Loading Studio', {exact: true})).toHaveCount(
+				0,
+			);
+			await expect(page.getByText(/^\d+%$/)).toHaveCount(0);
+			const loadingLogo = page.locator('svg[viewBox="-100 -100 400 400"]');
+			await expect(loadingLogo).toBeVisible();
+			const logoBounds = await loadingLogo.boundingBox();
+			const progressBounds = await loadingProgress.boundingBox();
+			expect(logoBounds).not.toBeNull();
+			expect(progressBounds).not.toBeNull();
+			expect(progressBounds?.width).toBe(168);
+			expect(
+				(progressBounds?.y ?? 0) -
+					((logoBounds?.y ?? 0) + (logoBounds?.height ?? 0)),
+			).toBe(20);
+			releaseVendorBundleRequest();
+			await expect
+				.poll(
+					async () => {
+						const value = Number(
+							await loadingProgress.getAttribute('aria-valuenow'),
+						);
+						return value > 0 && value < 95;
+					},
+					{timeout: 10_000},
+				)
+				.toBe(true);
+			const studio = page.frameLocator('iframe');
+			await expect(studio.locator('[data-compname="MyComp"]')).toBeVisible();
+			await expect(
+				studio.locator('.remotion-studio-composition-container'),
+			).toBeVisible();
+			await expect.poll(() => new URL(page.url()).search).toBe('?/MyComp');
+			await expect(page).toHaveTitle(
+				'MyComp / template-blank - Remotion Studio',
+				{timeout: 5000},
+			);
+			await studio.locator('button:has(svg[viewBox="0 0 415 426"])').click();
+			const popupPromise = page.waitForEvent('popup');
+			await studio.getByText('About Remotion', {exact: true}).click();
+			const popup = await popupPromise;
+			await popup.waitForLoadState('domcontentloaded');
+			expect(popup.url()).toBe('https://remotion.dev/');
+			await popup.close();
+			await studio.getByRole('button', {name: 'File', exact: true}).click();
+			const fileMenu = studio
+				.locator('[data-remotion-menu-tree-id]')
+				.filter({hasText: 'New composition...'});
+			await expect(fileMenu).toBeVisible();
+			await expect(
+				fileMenu.getByText('New folder...', {exact: true}),
+			).toBeVisible();
+			await expect(
+				fileMenu.getByText('Import OpenTimeline...', {exact: true}),
+			).toBeVisible();
+			await expect(
+				studio.getByRole('button', {
+					name: 'Open in File Manager',
+					exact: true,
+				}),
+			).toHaveCount(0);
+			await page.keyboard.press('Escape');
+
+			await studio.getByRole('button', {name: /Search/}).click();
+			const quickSwitcher = studio.getByRole('dialog');
+			const quickSwitcherInput = quickSwitcher.getByRole('textbox');
+			await quickSwitcherInput.fill('> Settings');
+			await expect(
+				quickSwitcher.getByText('Settings...', {exact: true}),
+			).toBeVisible();
+			await quickSwitcher.getByText('Settings...', {exact: true}).click();
+			const settings = studio.getByRole('dialog');
+			await expect(
+				settings.getByRole('button', {name: 'Shortcuts', exact: true}),
+			).toBeVisible();
+			await expect(
+				settings.getByRole('button', {name: 'Packages', exact: true}),
+			).toBeVisible();
+			for (const hiddenTab of [
+				'Defaults',
+				'Studio',
+				'Skills',
+				'Apps',
+				'License',
+			]) {
+				await expect(
+					settings.getByRole('button', {name: hiddenTab, exact: true}),
+				).toHaveCount(0);
+			}
+
+			await expect(
+				settings.getByText('Keyboard shortcuts', {exact: true}),
+			).toHaveCount(0);
+			await expect(
+				settings.getByRole('list', {name: 'Playback', exact: true}),
+			).toBeVisible();
+			await expect(
+				settings.getByText('Changes save to', {exact: true}),
+			).toHaveCount(0);
+			await studio.locator('body').press('Escape');
+
+			await studio.getByRole('button', {name: /Search/}).click();
+			const secondQuickSwitcher = studio.getByRole('dialog');
+			const secondQuickSwitcherInput = secondQuickSwitcher.getByRole('textbox');
+			await secondQuickSwitcherInput.fill('> Restart Studio Server');
+			await expect(
+				secondQuickSwitcher.getByText('Restart Studio Server', {exact: true}),
+			).toHaveCount(0);
+			await secondQuickSwitcherInput.press('Escape');
+
+			await studio.locator('[data-compname="MyComp"]').click();
+			await studio
+				.getByRole('button', {name: /Export the current composition/})
+				.click();
+			await expect(
+				studio.getByText('Input Props', {exact: true}),
+			).toBeVisible();
+			await expect(
+				studio.getByRole('button', {name: 'License', exact: true}),
+			).toHaveCount(0);
+			await studio.getByText('Still', {exact: true}).click();
+			const downloadPromise = page.waitForEvent('download');
+			await studio.getByRole('button', {name: 'Render still'}).click();
+			const download = await downloadPromise;
+			expect(download.suggestedFilename()).toBe('MyComp.png');
+			await expect(
+				studio.getByRole('button', {name: 'Download', exact: true}),
+			).toBeVisible();
+			await expect(
+				studio.getByRole('button', {name: 'Remove', exact: true}),
+			).toHaveCount(0);
+			const inspector = studio
+				.getByRole('button', {name: 'Composition', exact: true})
+				.last();
+			await expect(inspector).toBeVisible();
+			await inspector.click();
+			await studio.getByRole('button', {name: 'Add Solid'}).click();
+			const solid = studio.locator(
+				'[data-timeline-marquee-item][aria-label="<Solid>"]',
+			);
+			await expect(solid).toBeVisible();
+			await expect(studio.locator('svg[viewBox="0 0 24 16"]')).toBeVisible();
+			await solid.click();
+			await expect(
+				studio.getByRole('button', {name: 'Copy context for agents'}).first(),
+			).toBeAttached();
+			await expect(
+				studio.getByRole('button', {name: 'Open in another app'}),
+			).toHaveCount(0, {timeout: 1000});
+			await page.keyboard.press('Delete');
+			await expect(solid).toHaveCount(0);
+			await expect
+				.poll(() =>
+					page.evaluate(() => {
+						const browserWindow = window as typeof window & {
+							__browserStudioProject: {files: Record<string, string>};
+						};
+						return browserWindow.__browserStudioProject.files[
+							'/project/src/Composition.tsx'
+						];
+					}),
+				)
+				.not.toContain('<Solid');
+
+			const composition = studio.locator('[data-compname="MyComp"]');
+			await composition.click({button: 'right'});
+			await studio.getByText('Duplicate...', {exact: true}).click();
+			await expect(studio.getByText('Duplicate MyComp')).toBeVisible();
+			await expect(studio.getByPlaceholder('Composition ID')).toHaveValue(
+				'MyComp1',
+			);
+			await studio.getByPlaceholder('Composition ID').fill('测试');
+			await studio.getByRole('button', {name: /^Add to /}).click();
+			await expect(studio.locator('[data-compname="测试"]')).toBeVisible();
+			await expect
+				.poll(() => new URL(page.url()).search)
+				.toBe('?/%E6%B5%8B%E8%AF%95');
+			await expect(page).toHaveTitle(
+				'测试 / template-blank - Remotion Studio',
+				{timeout: 5000},
+			);
+			await page.goBack();
+			await expect.poll(() => new URL(page.url()).search).toBe('?/MyComp');
+			await expect(page).toHaveTitle(
+				'MyComp / template-blank - Remotion Studio',
+				{timeout: 5000},
+			);
+			await studio
+				.getByRole('button', {name: /Export the current composition/})
+				.click();
+			await expect(
+				studio.getByText('Render MyComp in the browser', {exact: true}),
+			).toBeVisible();
+			await studio.locator('body').press('Escape');
+			await expect
+				.poll(() =>
+					page.evaluate(() => {
+						const browserWindow = window as typeof window & {
+							__browserStudioProject: {files: Record<string, string>};
+						};
+						return browserWindow.__browserStudioProject.files[
+							'/project/src/Composition.tsx'
+						];
+					}),
+				)
+				.toContain('id="测试"');
+
+			await studio.getByRole('button', {name: /^Undo/}).click();
+			await expect.poll(() => new URL(page.url()).search).toBe('?/MyComp');
+			await expect
+				.poll(() =>
+					page.evaluate(() => {
+						const browserWindow = window as typeof window & {
+							__browserStudioProject: {files: Record<string, string>};
+						};
+						return browserWindow.__browserStudioProject.files[
+							'/project/src/Composition.tsx'
+						];
+					}),
+				)
+				.not.toContain('id="测试"');
+
+			await studio.getByRole('button', {name: /^Redo/}).click();
+			await expect
+				.poll(() => new URL(page.url()).search)
+				.toBe('?/%E6%B5%8B%E8%AF%95');
+			await expect(page).toHaveTitle(
+				'测试 / template-blank - Remotion Studio',
+				{timeout: 5000},
+			);
+			await expect
+				.poll(() =>
+					page.evaluate(() => {
+						const browserWindow = window as typeof window & {
+							__browserStudioProject: {files: Record<string, string>};
+						};
+						return browserWindow.__browserStudioProject.files[
+							'/project/src/Composition.tsx'
+						];
+					}),
+				)
+				.toContain('id="测试"');
+
+			const duplicatedComposition = studio.locator('[data-compname="测试"]');
+			await duplicatedComposition.click({button: 'right'});
+			await studio.getByText('Delete...', {exact: true}).click();
+			await expect(studio.getByText('Delete composition')).toBeVisible();
+			await studio.getByRole('button', {name: /^Delete from /}).click();
+			await expect.poll(() => new URL(page.url()).search).toBe('?/MyComp');
+			await expect
+				.poll(() =>
+					page.evaluate(() => {
+						const browserWindow = window as typeof window & {
+							__browserStudioProject: {files: Record<string, string>};
+						};
+						return browserWindow.__browserStudioProject.files[
+							'/project/src/Composition.tsx'
+						];
+					}),
+				)
+				.not.toContain('id="测试"');
+
+			await studio.getByRole('button', {name: /^Undo/}).click();
+			await expect
+				.poll(() => new URL(page.url()).search)
+				.toBe('?/%E6%B5%8B%E8%AF%95');
+			await expect(duplicatedComposition).toBeVisible();
+
+			await studio.getByRole('button', {name: /^Redo/}).click();
+			await expect.poll(() => new URL(page.url()).search).toBe('?/MyComp');
+			await expect(duplicatedComposition).toHaveCount(0);
+
+			await composition.click({button: 'right'});
+			await studio.getByText('Delete...', {exact: true}).click();
+			await studio.getByRole('button', {name: /^Delete from /}).click();
+			await expect.poll(() => new URL(page.url()).search).toBe('?/');
+			await expect(composition).toHaveCount(0);
+			await expect(
+				studio.locator('.remotion-studio-composition-container'),
+			).toHaveCount(0);
+
+			await studio.getByRole('button', {name: /^Undo/}).click();
+			await expect.poll(() => new URL(page.url()).search).toBe('?/MyComp');
+			await expect(composition).toBeVisible();
+
+			await studio.getByRole('button', {name: /^Redo/}).click();
+			await expect.poll(() => new URL(page.url()).search).toBe('?/');
+			await expect(composition).toHaveCount(0);
+			await expect(
+				studio.locator('.remotion-studio-composition-container'),
+			).toHaveCount(0);
+			await expect(page).toHaveTitle('Remotion Studio');
+		})(),
+		pageError,
+	]);
+
+	expect(pageErrors).toEqual([]);
+	expect(workspacePackageRequests).not.toContain(
+		'/__remotion_browser_studio_workspace__/commits/e2e/packages/core/dist/esm/index.mjs',
+	);
+	expect(workspacePackageRequests).not.toContain(
+		'/__remotion_browser_studio_workspace__/commits/e2e/packages/studio/dist/esm/previewEntry.mjs',
+	);
+	expect(workspacePackageRequests).toContain(
+		'/__remotion_browser_studio_workspace__/commits/e2e/packages/transitions/dist/esm/fade.mjs',
+	);
+	expect(vendorBundleRequests).toHaveLength(1);
+	expect(vendorBundleStartedBeforeIframe).toBe(true);
+	expect(remoteRemotionRequests).toEqual([]);
+	expect(studioApiRequests).toEqual([]);
+});
+
+test('loads remotion.new from one immutable release artifact set', async ({
+	page,
+}) => {
+	const releasePackageRequests: string[] = [];
+	const remoteRemotionRequests: string[] = [];
+	const vendorBundleRequests: string[] = [];
+	page.on('request', (request) => {
+		const requestUrl = new URL(request.url());
+		if (requestUrl.searchParams.has('browserStudioVendor')) {
+			vendorBundleRequests.push(request.url());
+		}
+
+		if (
+			requestUrl.pathname.startsWith('/__remotion_browser_studio_release__/')
+		) {
+			releasePackageRequests.push(requestUrl.pathname);
+		}
+
+		if (
+			requestUrl.hostname === 'esm.sh' &&
+			(decodeURIComponent(requestUrl.pathname).includes('/@remotion/') ||
+				/^\/remotion(?:@|\/|$)/.test(requestUrl.pathname))
+		) {
+			remoteRemotionRequests.push(request.url());
+		}
+	});
+
+	await page.goto('/?source=release');
+	const studio = page.frameLocator('iframe');
+	await expect(studio.locator('[data-compname="MyComp"]')).toBeVisible();
+	await studio.locator('[data-compname="MyComp"]').click();
+	await expect(
+		studio.locator('.remotion-studio-composition-container'),
+	).toBeVisible();
+	expect(releasePackageRequests).toEqual([
+		`/__remotion_browser_studio_release__/${await page.evaluate(() => (window as typeof window & {__browserStudioRemotionVersion: string}).__browserStudioRemotionVersion)}/packages/transitions/dist/esm/fade.mjs`,
+	]);
+	expect(vendorBundleRequests).toHaveLength(1);
+	expect(remoteRemotionRequests).toEqual([]);
+});
+
+test('stores, reclaims, ranges, and downloads imported OPFS files', async ({
+	page,
+}) => {
+	const rawFiles: Record<string, string> = {
+		'package.json': JSON.stringify({
+			dependencies: {
+				react: '^19.0.0',
+				'react-dom': '^19.0.0',
+				remotion: '^4.0.0',
+			},
+		}),
+		'public/pixel.svg':
+			'<svg xmlns="http://www.w3.org/2000/svg" width="64" height="64"><rect width="64" height="64" fill="red"/></svg>',
+		'src/index.ts':
+			"import {registerRoot} from 'remotion'; import {Root} from './Root'; registerRoot(Root);",
+		'src/Root.tsx': `import {AbsoluteFill, Composition, Img, staticFile} from 'remotion';
+
+const OpfsComposition = () => <AbsoluteFill><Img src={staticFile('pixel.svg')} /></AbsoluteFill>;
+
+export const Root = () => <Composition id="OpfsComp" component={OpfsComposition} durationInFrames={30} fps={30} width={64} height={64} />;
+`,
+	};
+	const encoder = new TextEncoder();
+	const tree = Object.entries(rawFiles).map(([path, contents]) => ({
+		path,
+		size: encoder.encode(contents).byteLength,
+		type: 'blob',
+	}));
+	const treeSha = 'ddc7ec42c2c9c06e84c9d5d2606e7ffc1394d900';
+
+	await page
+		.context()
+		.route(
+			'https://api.github.com/repos/remotion-dev/opfs-fixture/git/trees/HEAD?recursive=1',
+			(route) =>
+				route.fulfill({
+					contentType: 'application/json',
+					body: JSON.stringify({sha: treeSha, tree, truncated: false}),
+				}),
+		);
+	await page
+		.context()
+		.route(
+			`https://raw.githubusercontent.com/remotion-dev/opfs-fixture/${treeSha}/**`,
+			(route) => {
+				const marker = `/${treeSha}/`;
+				const url = route.request().url();
+				const path = decodeURIComponent(
+					url.slice(url.indexOf(marker) + marker.length),
+				);
+				const contents = rawFiles[path];
+				return contents === undefined
+					? route.fulfill({status: 404})
+					: route.fulfill({body: contents});
+			},
+		);
+
+	await page.goto('/?github=1');
+	const studio = page.frameLocator('iframe');
+	await expect(studio.locator('[data-compname="OpfsComp"]')).toBeVisible();
+	await expect.poll(() => new URL(page.url()).search).toBe('?/OpfsComp');
+	await studio.locator('[data-compname="OpfsComp"]').click();
+	await expect(
+		studio.locator('.remotion-studio-composition-container img'),
+	).toBeVisible();
+
+	const projectStorage = await page.evaluate(() => {
+		const project = (
+			window as typeof window & {
+				__browserStudioProject: {
+					publicFileStorage?: {type: string};
+					publicFiles?: Record<string, {sizeInBytes?: number; type?: string}>;
+				};
+			}
+		).__browserStudioProject;
+		return {
+			file: project.publicFiles?.['pixel.svg'],
+			storage: project.publicFileStorage,
+		};
+	});
+	expect(projectStorage).toEqual({
+		file: {
+			key: expect.any(String),
+			lastModified: expect.any(Number),
+			sizeInBytes: encoder.encode(rawFiles['public/pixel.svg']).byteLength,
+			type: 'stored',
+		},
+		storage: {
+			directoryName: expect.any(String),
+			type: 'opfs',
+		},
+	});
+
+	const studioFrame = page.frames().find((frame) => frame !== page.mainFrame());
+	if (!studioFrame) {
+		throw new Error('Could not find the remotion.new frame');
+	}
+
+	const rangeResult = await studioFrame.evaluate(async () => {
+		const src = window.remotion_staticFiles.find(
+			(file) => file.name === 'pixel.svg',
+		)?.src;
+		if (!src) {
+			throw new Error('Could not find pixel.svg');
+		}
+
+		const response = await fetch(src, {headers: {Range: 'bytes=0-3'}});
+		return {body: await response.text(), status: response.status};
+	});
+	expect(rangeResult).toEqual({body: '<svg', status: 206});
+
+	await studioFrame.evaluate(async () => {
+		await window.remotion_browserStudio.writeStaticFile({
+			contents: new TextEncoder().encode('temporary').buffer,
+			filePath: 'temporary.txt',
+		});
+	});
+	await expect
+		.poll(() =>
+			page.evaluate(
+				() =>
+					(
+						window.__browserStudioProject.publicFiles?.['temporary.txt'] as
+							| {key?: string}
+							| undefined
+					)?.key,
+			),
+		)
+		.toEqual(expect.any(String));
+	const temporaryKey = await page.evaluate(
+		() =>
+			(
+				window.__browserStudioProject.publicFiles?.['temporary.txt'] as
+					| {key: string}
+					| undefined
+			)?.key,
+	);
+	await studioFrame.evaluate(async () => {
+		await window.remotion_browserStudio.undo();
+		await window.remotion_browserStudio.redo();
+	});
+	await expect
+		.poll(() =>
+			page.evaluate(
+				() =>
+					(
+						window.__browserStudioProject.publicFiles?.['temporary.txt'] as
+							| {key?: string}
+							| undefined
+					)?.key,
+			),
+		)
+		.toBe(temporaryKey);
+	await studioFrame.evaluate(async () => {
+		await window.remotion_browserStudio.undo();
+		await window.remotion_browserStudio.writeStaticFile({
+			contents: new TextEncoder().encode('kept').buffer,
+			filePath: 'kept.txt',
+		});
+	});
+	const retainedKeys = await page.evaluate(() => {
+		const publicFiles = window.__browserStudioProject.publicFiles as
+			| Record<string, {key?: string}>
+			| undefined;
+		return [publicFiles?.['kept.txt']?.key, publicFiles?.['pixel.svg']?.key];
+	});
+	expect(retainedKeys).not.toContain(undefined);
+	await expect
+		.poll(
+			() =>
+				page.evaluate(async () => {
+					const storage = window.__browserStudioProject.publicFileStorage;
+					if (!storage) {
+						throw new Error('Expected remotion.new project storage');
+					}
+
+					const root = await navigator.storage.getDirectory();
+					const browserStudioDirectory = await root.getDirectoryHandle(
+						'remotion-browser-studio',
+					);
+					const projectsDirectory =
+						await browserStudioDirectory.getDirectoryHandle('projects');
+					const projectDirectory = await projectsDirectory.getDirectoryHandle(
+						storage.directoryName,
+					);
+					const keys: string[] = [];
+					for await (const key of (
+						projectDirectory as FileSystemDirectoryHandle & {
+							keys: () => AsyncIterableIterator<string>;
+						}
+					).keys()) {
+						keys.push(key);
+					}
+
+					return keys.sort();
+				}),
+			{timeout: 10_000},
+		)
+		.toEqual(retainedKeys.toSorted());
+	expect(retainedKeys).not.toContain(temporaryKey);
+
+	const archiveBytes = await studioFrame.evaluate(async () => {
+		const {data} = await window.remotion_browserStudio.downloadProject();
+		return Array.from(data);
+	});
+	const archive = unzipSync(new Uint8Array(archiveBytes));
+	expect(strFromU8(archive['public/pixel.svg'])).toBe(
+		rawFiles['public/pixel.svg'],
+	);
+	expect(strFromU8(archive['public/kept.txt'])).toBe('kept');
+	expect(archive['public/temporary.txt']).toBeUndefined();
+	const secondPage = await page.context().newPage();
+	await secondPage.goto('/?github=1');
+	await expect(
+		secondPage.frameLocator('iframe').locator('[data-compname="OpfsComp"]'),
+	).toBeVisible();
+	expect(
+		await studioFrame.evaluate(async () => {
+			const src = window.remotion_staticFiles.find(
+				(file) => file.name === 'pixel.svg',
+			)?.src;
+			if (!src) {
+				throw new Error('Could not find pixel.svg');
+			}
+
+			return (await fetch(src)).status;
+		}),
+	).toBe(200);
+	await secondPage.close();
+
+	const previousDirectoryName = projectStorage.storage?.directoryName;
+	await page.goto('/?github=1');
+	await expect(studio.locator('[data-compname="OpfsComp"]')).toBeVisible();
+	const reloadedStorage = await page.evaluate(
+		() => window.__browserStudioProject.publicFileStorage,
+	);
+	expect(reloadedStorage?.directoryName).not.toBe(previousDirectoryName);
+	const remainingProjectDirectories = await page.evaluate(async () => {
+		const root = await navigator.storage.getDirectory();
+		const browserStudioDirectory = await root.getDirectoryHandle(
+			'remotion-browser-studio',
+		);
+		const projectsDirectory =
+			await browserStudioDirectory.getDirectoryHandle('projects');
+		const directories: string[] = [];
+		for await (const name of (
+			projectsDirectory as FileSystemDirectoryHandle & {
+				keys: () => AsyncIterableIterator<string>;
+			}
+		).keys()) {
+			directories.push(name);
+		}
+
+		return directories;
+	});
+	expect(remainingProjectDirectories).toContain(reloadedStorage?.directoryName);
+	expect(remainingProjectDirectories).not.toContain(previousDirectoryName);
+});
+
+test('drops assets onto canvas and Tracks and moves clips with undo and redo', async ({
+	page,
+}) => {
+	await page.setViewportSize({width: 1600, height: 1000});
+	const studioApiRequests: string[] = [];
+	page.on('request', (request) => {
+		const requestUrl = new URL(request.url());
+		if (
+			requestUrl.pathname.startsWith('/api/') &&
+			requestUrl.origin === new URL(page.url()).origin
+		) {
+			studioApiRequests.push(requestUrl.pathname);
+		}
+	});
+
+	await page.goto('/');
+	const studio = page.frameLocator('iframe');
+	await expect(studio.locator('[data-compname="MyComp"]')).toBeVisible();
+	await waitForBrowserStudioOperations(studio);
+	await studio.locator('[data-compname="MyComp"]').click();
+	const canvas = studio.locator('.remotion-studio-composition-container');
+	await expect(canvas).toBeVisible();
+	await dropLocalFile({
+		filePath: localImagePath,
+		page,
+		target: canvas,
+	});
+	await expect(
+		studio.locator('[data-timeline-marquee-item][aria-label="<CanvasImage>"]'),
+	).toBeVisible();
+
+	await expect
+		.poll(() =>
+			page.evaluate(() => {
+				const browserWindow = window as typeof window & {
+					__browserStudioProject: {
+						files: Record<string, string>;
+						publicFiles?: Record<
+							string,
+							Uint8Array | string | {sizeInBytes: number; type: 'stored'}
+						>;
+					};
+				};
+				const contents =
+					browserWindow.__browserStudioProject.publicFiles?.['logo.png'];
+				return {
+					composition:
+						browserWindow.__browserStudioProject.files[
+							'/project/src/Composition.tsx'
+						],
+					publicFileSize:
+						typeof contents === 'string'
+							? new TextEncoder().encode(contents).byteLength
+							: contents instanceof Uint8Array
+								? contents.byteLength
+								: contents?.sizeInBytes,
+				};
+			}),
+		)
+		.toMatchObject({
+			composition: expect.stringContaining('logo.png'),
+			publicFileSize: expect.any(Number),
+		});
+
+	const timeline = studio.getByRole('region', {name: 'Timeline', exact: true});
+	const addTrack = async () => {
+		const box = await timeline.boundingBox();
+		if (!box) throw new Error('Timeline is not visible');
+		await timeline.click({
+			button: 'right',
+			position: {x: box.width - 30, y: box.height - 10},
+		});
+		await studio.getByRole('button', {name: 'Add Track', exact: true}).click();
+	};
+
+	await addTrack();
+	const track = studio.locator('[data-track-drop-target]').first();
+	await expect(track).toBeAttached();
+	const image = studio.locator(
+		'[data-timeline-marquee-item][aria-label="<CanvasImage>"]',
+	);
+	const imageBox = await image.boundingBox();
+	const trackBox = await track.boundingBox();
+	if (!imageBox || !trackBox) throw new Error('Expected an image and Track');
+	await page.mouse.move(
+		imageBox.x + Math.min(25, imageBox.width / 2),
+		imageBox.y + imageBox.height / 2,
+	);
+	await page.mouse.down();
+	await page.mouse.move(
+		imageBox.x + Math.min(25, imageBox.width / 2),
+		trackBox.y + trackBox.height / 2,
+		{steps: 10},
+	);
+	await page.mouse.up();
+	const readComposition = () =>
+		page.evaluate(
+			() => window.__browserStudioProject.files['/project/src/Composition.tsx'],
+		);
+	await expect
+		.poll(readComposition)
+		.toMatch(/<Track[\s>][\s\S]*<Sequence[\s>][\s\S]*<CanvasImage/);
+	await expect(
+		studio.getByText('Moving into Track...', {exact: true}),
+	).toBeHidden();
+	const movedSource = await readComposition();
+	const undoOrRedo = async (shortcut: string) => {
+		const refresh = studio
+			.locator('body')
+			.evaluate(
+				() =>
+					new Promise<void>((resolve) => {
+						window.addEventListener(
+							'remotion-react-refresh-finished',
+							() => resolve(),
+							{once: true},
+						);
+					}),
+			)
+			.catch((error: unknown) => {
+				if (
+					!(error instanceof Error) ||
+					!error.message.includes('Execution context was destroyed')
+				)
+					throw error;
+			});
+		await Promise.all([refresh, studio.locator('body').press(shortcut)]);
+		await expect(timeline).toBeVisible();
+	};
+
+	await undoOrRedo('ControlOrMeta+z');
+	await expect.poll(readComposition).not.toBe(movedSource);
+	await undoOrRedo('ControlOrMeta+Shift+z');
+	await expect.poll(readComposition).toBe(movedSource);
+	await expect(track).toBeVisible();
+	const movedImage = studio
+		.locator('[data-timeline-marquee-item][aria-label="<CanvasImage>"]')
+		.first();
+	const expandTrack = studio
+		.getByRole('button', {name: /Expand children of.*Track/})
+		.first();
+	await expect
+		.poll(
+			async () => {
+				const imageVisible = await movedImage.isVisible();
+				const expandVisible = await expandTrack.isVisible();
+				return imageVisible || expandVisible;
+			},
+			{timeout: 10_000},
+		)
+		.toBe(true);
+	if (await expandTrack.isVisible()) await expandTrack.click();
+	await expect(movedImage).toBeVisible({timeout: 10_000});
+	await dropLocalFile({filePath: localImagePath, page, target: track});
+	await expect(
+		studio.getByText(/Could not add asset: This item would overlap/),
+	).toBeVisible();
+	expect(await readComposition()).toBe(movedSource);
+	const firstTrackId = await track.getAttribute('data-track-drop-target');
+	await addTrack();
+	await expect
+		.poll(
+			async () =>
+				(await readComposition()).match(/<Track(?:\s|>)/g)?.length ?? 0,
+		)
+		.toBe(2);
+	await expect
+		.poll(() =>
+			studio
+				.locator('[data-track-drop-target]')
+				.last()
+				.getAttribute('data-track-drop-target'),
+		)
+		.not.toBe(firstTrackId);
+	const secondTrack = studio.locator('[data-track-drop-target]').last();
+	await expect(secondTrack).toBeVisible();
+	await dropLocalFile({
+		filePath: localVideoPath,
+		page,
+		target: secondTrack,
+	});
+	await expect(
+		studio.getByRole('group', {name: 'framer.webm', exact: true}),
+	).toBeVisible();
+	await expect
+		.poll(() =>
+			page.evaluate(() =>
+				window.__browserStudioProject.files[
+					'/project/src/Composition.tsx'
+				].includes('staticFile("framer.webm")'),
+			),
+		)
+		.toBe(true);
+	const finalSource = await readComposition();
+	expect(finalSource.indexOf('staticFile("framer.webm")')).toBeLessThan(
+		finalSource.lastIndexOf('</Track>'),
+	);
+	await page.screenshot({path: test.info().outputPath('track-drop.png')});
+
+	await addTrack();
+	await studio.locator('body').evaluate(async () => {
+		for (let index = 0; index < 12; index++) {
+			const result =
+				await window.remotion_browserStudio.insertCompositionElement({
+					compositionFile: '/project/src/Composition.tsx',
+					compositionId: 'MyComp',
+					from: null,
+					track: null,
+					element: {
+						type: 'component',
+						componentName: 'Sequence',
+						importName: 'Sequence',
+						importPath: 'remotion',
+						props: [{name: 'name', value: `Filler ${index}`}],
+						position: null,
+					},
+				});
+			if (!result.success) throw new Error(result.reason);
+		}
+	});
+	await expect(
+		studio.getByRole('group', {name: 'Filler 11', exact: true}).last(),
+	).toBeVisible();
+	const scrollArea = timeline.locator('.__remotion-vertical-scrollbar').first();
+	await expect
+		.poll(() =>
+			scrollArea.evaluate(
+				(element) => element.scrollHeight - element.clientHeight,
+			),
+		)
+		.toBeGreaterThan(200);
+	await scrollArea.evaluate((element) => {
+		element.scrollTop = 0;
+	});
+	const source = studio.locator(
+		'[data-timeline-marquee-item][aria-label="Filler 0"]',
+	);
+	await expect(source).toBeInViewport();
+	const destination = studio.locator('[data-track-drop-target]').last();
+	await expect(destination).toBeInViewport();
+	const destinationBox = await destination.boundingBox();
+	const sourceBox = await source.boundingBox();
+	const timelineBox = await timeline.boundingBox();
+	const rulerBox = await timeline
+		.locator('[data-timeline-ruler]')
+		.boundingBox();
+	if (!destinationBox || !sourceBox || !timelineBox || !rulerBox)
+		throw new Error('Expected the source, destination and timeline');
+	const rulerBottom = rulerBox.y + rulerBox.height;
+	const sourceX = sourceBox.x + Math.min(25, sourceBox.width / 2);
+	const beforeRejectedDrop = await readComposition();
+	await page.mouse.move(sourceX, sourceBox.y + sourceBox.height / 2);
+	await page.mouse.down();
+	await page.mouse.move(sourceX, destinationBox.y + destinationBox.height / 2, {
+		steps: 10,
+	});
+	const preview = destination.locator('[data-timeline-track-drop-preview]');
+	await expect(preview).toBeVisible({timeout: 10_000});
+	await scrollArea.evaluate(
+		(element, scrollTop) => {
+			element.scrollTop = scrollTop;
+		},
+		destinationBox.y - rulerBottom + 12,
+	);
+	await expect
+		.poll(() => destination.boundingBox().then((box) => box?.y ?? Infinity))
+		.toBeLessThan(rulerBottom);
+	const paintsOverRuler = await preview.evaluate(isTrackDropPreviewAboveRuler);
+	if (paintsOverRuler) {
+		try {
+			await captureTrackDropFailureEvidence({
+				page,
+				preview,
+				rulerBottom,
+				testInfo: test.info(),
+			});
+		} catch (error) {
+			await test
+				.info()
+				.attach('track-drop-evidence-error', {
+					body: String(error),
+					contentType: 'text/plain',
+				})
+				.catch(() => undefined);
+		}
+	}
+
+	expect(paintsOverRuler).toBe(false);
+	await page.screenshot({
+		path: test.info().outputPath('track-drop-clipped.png'),
+	});
+	await page.mouse.move(sourceX, rulerBottom - 2, {steps: 5});
+	await expect(preview).toHaveCount(0);
+	await page.mouse.up();
+	await expect(
+		studio.getByText('Moving into Track...', {exact: true}),
+	).toBeHidden();
+	expect(await readComposition()).toBe(beforeRejectedDrop);
+	expect(studioApiRequests).toEqual([]);
+});
+
+test('drops a local file into the virtual Assets folder', async ({page}) => {
+	const studioApiRequests: string[] = [];
+	page.on('request', (request) => {
+		const requestUrl = new URL(request.url());
+		if (
+			requestUrl.pathname.startsWith('/api/') &&
+			requestUrl.origin === new URL(page.url()).origin
+		) {
+			studioApiRequests.push(requestUrl.pathname);
+		}
+	});
+
+	await page.goto('/');
+	const studio = page.frameLocator('iframe');
+	await expect(studio.locator('[data-compname="MyComp"]')).toBeVisible();
+	await waitForBrowserStudioOperations(studio);
+	await studio.getByRole('button', {name: 'Assets', exact: true}).click();
+	const assetSelector = studio.locator('[data-asset-selector]');
+	await expect(assetSelector).toBeVisible();
+	await dropLocalFile({
+		filePath: localImagePath,
+		page,
+		target: assetSelector,
+	});
+
+	await expect(studio.getByText('logo.png', {exact: true})).toBeVisible();
+	await assetSelector.getByText('logo.png', {exact: true}).click();
+	await expect(studio.locator('img[src^="blob:"]')).toBeVisible();
+	await expect
+		.poll(() =>
+			page.evaluate(() => {
+				const browserWindow = window as typeof window & {
+					__browserStudioProject: {
+						files: Record<string, string>;
+						publicFiles?: Record<
+							string,
+							Uint8Array | string | {sizeInBytes: number; type: 'stored'}
+						>;
+					};
+				};
+				const contents =
+					browserWindow.__browserStudioProject.publicFiles?.['logo.png'];
+				return {
+					composition:
+						browserWindow.__browserStudioProject.files[
+							'/project/src/Composition.tsx'
+						],
+					publicFileSize:
+						typeof contents === 'string'
+							? new TextEncoder().encode(contents).byteLength
+							: contents instanceof Uint8Array
+								? contents.byteLength
+								: contents?.sizeInBytes,
+				};
+			}),
+		)
+		.toMatchObject({
+			composition: expect.not.stringContaining('logo.png'),
+			publicFileSize: expect.any(Number),
+		});
+	expect(studioApiRequests).toEqual([]);
+});
+
+test('previews effects and chains edits while browser persistence is delayed', async ({
+	page,
+}) => {
+	await page.goto('/');
+	const studio = page.frameLocator('iframe');
+	await waitForBrowserStudioOperations(studio);
+	await studio.getByRole('button', {name: 'Add Solid', exact: true}).click();
+	await studio.getByRole('button', {name: 'Add effect', exact: true}).click();
+	await studio.getByPlaceholder('Search effects...').fill('brightness');
+	await expect(
+		studio.getByRole('img', {
+			name: 'brightness() on the selected element',
+			exact: true,
+		}),
+	).toBeVisible();
+	await studio
+		.getByRole('button', {name: 'Add brightness() effect', exact: true})
+		.click();
+	await expect
+		.poll(() =>
+			page.evaluate(
+				() =>
+					window.__browserStudioProject.files['/project/src/Composition.tsx'],
+			),
+		)
+		.toMatch(/effects=\{\[\s*brightness\(/);
+	await expect(
+		studio.getByRole('button', {name: 'Collapse brightness() section'}),
+	).toBeVisible();
+	const savedSource = await page.evaluate(
+		() => window.__browserStudioProject.files['/project/src/Composition.tsx'],
+	);
+	await studio.locator('body').evaluate(() => {
+		const studioWindow = window as typeof window & {
+			remotion_browserStudio: BrowserStudioOperations;
+			__releaseEffectPersistence: () => void;
+		};
+		const {effects: effectOperations} = studioWindow.remotion_browserStudio;
+		if (!effectOperations)
+			throw new Error('remotion.new effect editing is unavailable');
+		const {duplicateEffects: duplicate} = effectOperations;
+		let first = true;
+		const gate = new Promise<void>((resolve) => {
+			studioWindow.__releaseEffectPersistence = resolve;
+		});
+		effectOperations.duplicateEffects = async (params) => {
+			if (first) {
+				first = false;
+				await gate;
+			}
+
+			return duplicate(params);
+		};
+	});
+	const effects = studio.getByRole('region', {name: 'Effects', exact: true});
+	const brightness = effects.getByRole('group', {
+		name: 'brightness()',
+		exact: true,
+	});
+	try {
+		await brightness.click({button: 'right'});
+		await studio
+			.getByRole('button', {name: 'Duplicate', exact: true})
+			.last()
+			.click();
+		await expect(brightness).toHaveCount(2, {timeout: 1_000});
+		await page.keyboard.press('ControlOrMeta+d');
+		await expect(brightness).toHaveCount(3, {timeout: 1_000});
+		await page.keyboard.press('Backspace');
+		await expect(brightness).toHaveCount(2, {timeout: 1_000});
+		await studio.getByRole('button', {name: 'Add effect', exact: true}).click();
+		await studio.getByPlaceholder('Search effects...').fill('wave');
+		await studio
+			.getByRole('button', {name: 'Add wave() effect', exact: true})
+			.click();
+		const wave = effects.getByRole('group', {name: 'wave()', exact: true});
+		await expect(wave).toHaveCount(1, {timeout: 1_000});
+		expect(
+			await page.evaluate(
+				() =>
+					window.__browserStudioProject.files['/project/src/Composition.tsx'],
+			),
+		).toBe(savedSource);
+		await studio.locator('body').evaluate(() => {
+			(
+				window as typeof window & {__releaseEffectPersistence: () => void}
+			).__releaseEffectPersistence();
+		});
+		await expect
+			.poll(() =>
+				page.evaluate(() => {
+					const source =
+						window.__browserStudioProject.files['/project/src/Composition.tsx'];
+					return {
+						brightness: source.match(/brightness\(/g)?.length ?? 0,
+						wave: source.match(/wave\(/g)?.length ?? 0,
+					};
+				}),
+			)
+			.toEqual({brightness: 2, wave: 1});
+		await expect(brightness).toHaveCount(2);
+		await expect(wave).toHaveCount(1);
+	} finally {
+		await studio.locator('body').evaluate(() => {
+			(
+				window as typeof window & {__releaseEffectPersistence: () => void}
+			).__releaseEffectPersistence();
+		});
+	}
+});
+
+test('installs packages without a server API and preserves undo, redo, and HMR', async ({
+	page,
+}) => {
+	const studioApiRequests: string[] = [];
+	page.on('request', (request) => {
+		const requestUrl = new URL(request.url());
+		if (
+			requestUrl.pathname.startsWith('/api/') &&
+			requestUrl.origin === new URL(page.url()).origin
+		) {
+			studioApiRequests.push(requestUrl.pathname);
+		}
+	});
+
+	await page.goto('/');
+	const studio = page.frameLocator('iframe');
+	await expect(studio.locator('[data-compname="MyComp"]')).toBeVisible();
+	await waitForBrowserStudioOperations(studio);
+	await studio.locator('body').evaluate(() => {
+		(
+			window as typeof window & {
+				__browserStudioInstallPreservedIframe?: boolean;
+			}
+		).__browserStudioInstallPreservedIframe = true;
+	});
+
+	await studio.getByRole('button', {name: 'Tools', exact: true}).click();
+	await studio.getByText('Install package...', {exact: true}).click();
+	await expect(studio.getByText('Settings', {exact: true})).toBeVisible();
+	await expect(studio.getByText('Packages', {exact: true})).toBeVisible();
+	await studio.locator('input[name="@remotion/google-fonts"]').click();
+	await studio.getByRole('button', {name: /^Install/}).click();
+	await expect(
+		studio.getByText('Installed package successfully.'),
+	).toBeVisible();
+	await expect
+		.poll(() =>
+			page.evaluate(() => {
+				const browserWindow = window as typeof window & {
+					__browserStudioProject: {files: Record<string, string>};
+					__browserStudioRemotionVersion: string;
+				};
+				const packageJson = JSON.parse(
+					browserWindow.__browserStudioProject.files['/project/package.json'],
+				) as {dependencies: Record<string, string>};
+				return packageJson.dependencies['@remotion/google-fonts'];
+			}),
+		)
+		.toBe(
+			await page.evaluate(
+				() =>
+					(
+						window as typeof window & {
+							__browserStudioRemotionVersion: string;
+						}
+					).__browserStudioRemotionVersion,
+			),
+		);
+	expect(
+		await studio.locator('body').evaluate(
+			() =>
+				(
+					window as typeof window & {
+						__browserStudioInstallPreservedIframe?: boolean;
+					}
+				).__browserStudioInstallPreservedIframe,
+		),
+	).toBe(true);
+
+	await studio.getByRole('button', {name: /^Done/}).click();
+	await page.keyboard.press('ControlOrMeta+Z');
+	await expect
+		.poll(() =>
+			page.evaluate(() => {
+				const browserWindow = window as typeof window & {
+					__browserStudioProject: {files: Record<string, string>};
+				};
+				const packageJson = JSON.parse(
+					browserWindow.__browserStudioProject.files['/project/package.json'],
+				) as {dependencies: Record<string, string>};
+				return packageJson.dependencies['@remotion/google-fonts'];
+			}),
+		)
+		.toBeUndefined();
+	await page.keyboard.press('ControlOrMeta+Shift+Z');
+	await expect
+		.poll(() =>
+			page.evaluate(() => {
+				const browserWindow = window as typeof window & {
+					__browserStudioProject: {files: Record<string, string>};
+				};
+				const packageJson = JSON.parse(
+					browserWindow.__browserStudioProject.files['/project/package.json'],
+				) as {dependencies: Record<string, string>};
+				return packageJson.dependencies['@remotion/google-fonts'];
+			}),
+		)
+		.toBeDefined();
+	expect(studioApiRequests).toEqual([]);
+});
+
+test('fetches each HTTP module once when the vendor bundle is overridden', async ({
+	page,
+}) => {
+	const requests: string[] = [];
+	const workspacePackageRequests: string[] = [];
+	page.on('request', (request) => {
+		requests.push(request.url());
+		const requestUrl = new URL(request.url());
+		if (
+			requestUrl.pathname.startsWith('/__remotion_browser_studio_workspace__/')
+		) {
+			workspacePackageRequests.push(requestUrl.pathname);
+		}
+	});
+
+	await page.goto('/?source=fallback');
+	const studio = page.frameLocator('iframe');
+	await expect(studio.locator('[data-compname="MyComp"]')).toBeVisible();
+	await expect(
+		studio.locator('.remotion-studio-composition-container'),
+	).toBeVisible();
+
+	expect(
+		workspacePackageRequests.filter(
+			(request) =>
+				request ===
+				'/__remotion_browser_studio_workspace__/commits/e2e/packages/core/dist/esm/index.mjs',
+		),
+	).toHaveLength(1);
+	expect(
+		workspacePackageRequests.filter(
+			(request) =>
+				request ===
+				'/__remotion_browser_studio_workspace__/commits/e2e/packages/core/dist/esm/no-react.mjs',
+		),
+	).toHaveLength(1);
+	expect(workspacePackageRequests).toContain(
+		'/__remotion_browser_studio_workspace__/commits/e2e/packages/studio/dist/esm/previewEntry.mjs',
+	);
+	const transformersUrl = await studio
+		.locator('script[type="importmap"]')
+		.evaluate((element) => {
+			const importMap = JSON.parse(element.textContent ?? '') as {
+				imports: Record<string, string>;
+			};
+			return importMap.imports['@huggingface/transformers'];
+		});
+	expect(requests).not.toContain(transformersUrl);
+	const pipelineType = await studio.locator('body').evaluate(async () => {
+		const loadTransformers = (
+			window as typeof window & {
+				__loadBrowserStudioTransformers: () => Promise<{pipeline: unknown}>;
+			}
+		).__loadBrowserStudioTransformers;
+		const transformers = await loadTransformers();
+		return typeof transformers.pipeline;
+	});
+	expect(pipelineType).toBe('function');
+	expect(
+		requests.filter((request) => request === transformersUrl),
+	).toHaveLength(1);
+});
+
+test('loads the local Transformers bundle on demand from the vendor Blob bundle', async ({
+	page,
+}) => {
+	const requests: string[] = [];
+	const vendorBundleRequests: string[] = [];
+	page.on('request', (request) => {
+		requests.push(request.url());
+		const requestUrl = new URL(request.url());
+		if (requestUrl.searchParams.has('browserStudioVendor')) {
+			vendorBundleRequests.push(request.url());
+		}
+	});
+
+	await page.goto('/?source=transformers-vendor');
+	const studio = page.frameLocator('iframe');
+	await expect(studio.locator('[data-compname="MyComp"]')).toBeVisible();
+	expect(vendorBundleRequests).toHaveLength(1);
+	expect(
+		await studio.locator('script[type="module"]').getAttribute('src'),
+	).toMatch(/^blob:/);
+	const transformersUrl = await studio
+		.locator('script[type="importmap"]')
+		.evaluate((element) => {
+			const importMap = JSON.parse(element.textContent ?? '') as {
+				imports: Record<string, string>;
+			};
+			return importMap.imports['@huggingface/transformers'];
+		});
+	expect(requests).not.toContain(transformersUrl);
+
+	const loaded = await studio.locator('body').evaluate(async () => {
+		const loadTransformers = (
+			window as typeof window & {
+				__loadBrowserStudioTransformers: () => Promise<{
+					env: unknown;
+					pipeline: unknown;
+				}>;
+			}
+		).__loadBrowserStudioTransformers;
+		const consumerTransformers = await loadTransformers();
+		const auxiliaryTransformers = await import('@huggingface/transformers');
+		return {
+			consumerPipelineType: typeof consumerTransformers.pipeline,
+			environmentsAreShared:
+				consumerTransformers.env === auxiliaryTransformers.env,
+			auxiliaryPipelineType: typeof auxiliaryTransformers.pipeline,
+		};
+	});
+
+	expect(loaded.consumerPipelineType).toBe('function');
+	expect(loaded.auxiliaryPipelineType).toBe('function');
+	expect(loaded.environmentsAreShared).toBe(true);
+	expect(
+		requests.filter((request) => request === transformersUrl),
+	).toHaveLength(1);
+});
+
+test('uses a custom Transformers resolution in the fallback bundle', async ({
+	page,
+}) => {
+	const fakeTransformersRequests: string[] = [];
+	const vendorBundleRequests: string[] = [];
+	page.on('request', (request) => {
+		const requestUrl = new URL(request.url());
+		if (requestUrl.pathname === '/fake-transformers.mjs') {
+			fakeTransformersRequests.push(request.url());
+		}
+
+		if (requestUrl.searchParams.has('browserStudioVendor')) {
+			vendorBundleRequests.push(request.url());
+		}
+	});
+
+	await page.goto('/?source=transformers-override');
+	const studio = page.frameLocator('iframe');
+	await expect(studio.locator('[data-compname="MyComp"]')).toBeVisible();
+	expect(vendorBundleRequests).toEqual([]);
+	expect(fakeTransformersRequests).toEqual([]);
+
+	const marker = await studio.locator('body').evaluate(async () => {
+		const loadTransformers = (
+			window as typeof window & {
+				__loadBrowserStudioTransformers: () => Promise<{
+					browserStudioOverrideMarker: number;
+				}>;
+			}
+		).__loadBrowserStudioTransformers;
+		const transformers = await loadTransformers();
+		return transformers.browserStudioOverrideMarker;
+	});
+
+	expect(marker).toBe(42);
+	expect(fakeTransformersRequests).toHaveLength(1);
+});
+
+test('drops and imports an Element payload with the deployment Remotion version', async ({
+	page,
+}) => {
+	await page.goto('/');
+	const studio = page.frameLocator('iframe');
+	await expect(studio.locator('[data-compname="MyComp"]')).toBeVisible();
+	await studio.locator('[data-compname="MyComp"]').click();
+	const canvas = studio.locator('.remotion-studio-composition-container');
+	await expect(canvas).toBeVisible();
+	const box = await canvas.boundingBox();
+	if (box === null) {
+		throw new Error('remotion.new canvas has no bounding box');
+	}
+
+	const dataTransfer = await canvas.evaluateHandle(() => new DataTransfer());
+	await dataTransfer.evaluate(
+		(transfer, initialProps) => {
+			const payload = JSON.stringify({
+				type: 'remotion-element',
+				version: 2,
+				element: {
+					assets: [
+						{
+							path: 'browser-element/logo.svg',
+							type: 'base64',
+							data: btoa(
+								'<svg xmlns="http://www.w3.org/2000/svg" width="20" height="20"><rect width="20" height="20" fill="blue" /></svg>',
+							),
+						},
+					],
+					dependencies: [{name: '@remotion/shapes', version: null}],
+					dimensions: {width: 320, height: 180},
+					displayName: 'Browser Element',
+					durationInFrames: 60,
+					installationMode: 'wrapped',
+					initialProps,
+					slug: 'browser-element',
+					sourceCode: `import {Rect} from '@remotion/shapes';
+import {Img} from 'remotion';
+
+export const BrowserElement = ({logoSrc}: {logoSrc: string}) => <>
+	<Rect width={320} height={180} fill="red" />
+	<Img alt="Element asset" src={logoSrc} />
+</>;
+`,
+				},
+			});
+			transfer.effectAllowed = 'copy';
+			transfer.setData(
+				'application/vnd.remotion.drag+json;v=1;type=element;width=320;height=180;duration=60',
+				payload,
+			);
+			transfer.setData('text/plain', payload);
+		},
+		{logoSrc: staticFileRef('browser-element/logo.svg')},
+	);
+	const coordinates = {
+		clientX: box.x + box.width / 2,
+		clientY: box.y + box.height / 2,
+		dataTransfer,
+	};
+	await canvas.dispatchEvent('dragover', coordinates);
+	await canvas.dispatchEvent('drop', coordinates);
+
+	await expect(
+		studio.getByText('Install Browser Element', {exact: true}),
+	).toBeVisible();
+	await expect(
+		studio.getByText('Unverified drag-and-drop payload'),
+	).toBeVisible();
+	await expect(
+		studio.getByText('Packages to install', {exact: true}),
+	).toBeVisible();
+	await expect(
+		studio.getByText('@remotion/shapes', {exact: true}),
+	).toBeVisible();
+	await studio.getByRole('button', {name: /^Install/}).click();
+
+	await expect
+		.poll(() =>
+			page.evaluate(() => {
+				const browserWindow = window as typeof window & {
+					__browserStudioProject: {files: Record<string, string>};
+					__browserStudioRemotionVersion: string;
+				};
+				const packageJson = JSON.parse(
+					browserWindow.__browserStudioProject.files['/project/package.json'],
+				) as {dependencies: Record<string, string>};
+				return {
+					composition:
+						browserWindow.__browserStudioProject.files[
+							'/project/src/Composition.tsx'
+						],
+					element:
+						browserWindow.__browserStudioProject.files[
+							'/project/src/browser-element.element.tsx'
+						],
+					installedVersion: packageJson.dependencies['@remotion/shapes'],
+					remotionVersion: browserWindow.__browserStudioRemotionVersion,
+				};
+			}),
+		)
+		.toMatchObject({
+			composition: expect.stringMatching(
+				/logoSrc=\{staticFile\(["']browser-element\/logo\.svg["']\)\}/,
+			),
+			element: expect.stringContaining(
+				'<Img alt="Element asset" src={logoSrc} />',
+			),
+			installedVersion: expect.any(String),
+		});
+	const versions = await page.evaluate(() => {
+		const browserWindow = window as typeof window & {
+			__browserStudioProject: {files: Record<string, string>};
+			__browserStudioRemotionVersion: string;
+		};
+		const packageJson = JSON.parse(
+			browserWindow.__browserStudioProject.files['/project/package.json'],
+		) as {dependencies: Record<string, string>};
+		return {
+			installed: packageJson.dependencies['@remotion/shapes'],
+			remotion: browserWindow.__browserStudioRemotionVersion,
+		};
+	});
+	expect(versions.installed).toBe(versions.remotion);
+	await expect(
+		studio.getByRole('img', {name: 'Element asset'}),
+	).toHaveJSProperty('naturalWidth', 20);
+	await expect(
+		studio.locator(
+			'[data-timeline-marquee-item][aria-label="Browser Element"]',
+		),
+	).toBeVisible();
+});
+
+test('confirms and imports an Element payload from the URL fragment', async ({
+	baseURL,
+	page,
+}) => {
+	const payload = createElementPayload({
+		dependencies: [{name: '@remotion/shapes', version: null}],
+		dimensions: {height: 180, width: 320},
+		displayName: 'Linked Element',
+		durationInFrames: 60,
+		installationMode: 'wrapped',
+		slug: 'linked-element',
+		sourceCode: `import {Rect} from '@remotion/shapes';
+
+export const LinkedElement = () => <Rect width={320} height={180} fill="red" />;`,
+	});
+	const url = StudioProtocolInternals.makeBrowserStudioUrl({
+		endpoint: new URL('/', baseURL).href,
+		payload,
+	});
+
+	await page.goto(url);
+	const studio = page.frameLocator('iframe');
+	await expect(studio.locator('[data-compname="MyComp"]')).toBeVisible();
+
+	await expect(
+		studio.getByText('Install Linked Element', {exact: true}),
+	).toBeVisible();
+	await expect(page).toHaveTitle(
+		'📦 Install Linked Element - Remotion Studio',
+		{timeout: 5000},
+	);
+	await expect(studio.getByText('Unverified remotion.new link')).toBeVisible();
+	await expect(studio.getByText('Linked Element')).toBeVisible();
+	await expect
+		.poll(() =>
+			page.evaluate(() => {
+				const browserWindow = window as typeof window & {
+					__browserStudioProject: {files: Record<string, string>};
+				};
+				return browserWindow.__browserStudioProject.files[
+					'/project/src/linked-element.element.tsx'
+				];
+			}),
+		)
+		.toBeUndefined();
+
+	await studio.locator('body').evaluate(() => {
+		(
+			window as typeof window & {
+				__browserStudioInstallPreservedIframe?: boolean;
+			}
+		).__browserStudioInstallPreservedIframe = true;
+	});
+	await expect(
+		studio.getByRole('button', {name: 'New composition'}),
+	).toHaveAttribute('aria-pressed', 'true');
+	await studio.getByRole('button', {name: /^Install/}).click();
+	await expect
+		.poll(() =>
+			page.evaluate(() => {
+				const browserWindow = window as typeof window & {
+					__browserStudioProject: {files: Record<string, string>};
+				};
+				return {
+					composition:
+						browserWindow.__browserStudioProject.files[
+							'/project/src/LinkedElementComposition.tsx'
+						],
+					element:
+						browserWindow.__browserStudioProject.files[
+							'/project/src/linked-element.element.tsx'
+						],
+				};
+			}),
+		)
+		.toEqual({
+			composition: expect.stringContaining('<LinkedElement />'),
+			element: expect.stringContaining("import {Rect} from '@remotion/shapes'"),
+		});
+	expect(
+		await studio.locator('body').evaluate(
+			() =>
+				(
+					window as typeof window & {
+						__browserStudioInstallPreservedIframe?: boolean;
+					}
+				).__browserStudioInstallPreservedIframe,
+		),
+	).toBe(true);
+	await expect(page).toHaveTitle(
+		'LinkedElementComposition / template-blank - Remotion Studio',
+		{
+			timeout: 5000,
+		},
+	);
+});
+
+test('reports inline SVG imports as unsupported without changing the project', async ({
+	page,
+}) => {
+	await page.goto('/');
+	const studio = page.frameLocator('iframe');
+	await expect(studio.locator('[data-compname="MyComp"]')).toBeVisible();
+	await studio.locator('[data-compname="MyComp"]').click();
+	const canvas = studio.locator('.remotion-studio-composition-container');
+	await expect(canvas).toBeVisible();
+	const compositionBefore = await page.evaluate(() => {
+		const browserWindow = window as typeof window & {
+			__browserStudioProject: {files: Record<string, string>};
+		};
+		return browserWindow.__browserStudioProject.files[
+			'/project/src/Composition.tsx'
+		];
+	});
+
+	const dataTransfer = await canvas.evaluateHandle(() => {
+		const transfer = new DataTransfer();
+		transfer.items.add(
+			new File(
+				['<svg viewBox="0 0 10 10"><circle r="4" /></svg>'],
+				'shape.svg',
+				{
+					type: 'image/svg+xml',
+				},
+			),
+		);
+		return transfer;
+	});
+	await canvas.dispatchEvent('dragover', {dataTransfer});
+	await canvas.dispatchEvent('drop', {dataTransfer});
+	await studio.getByRole('button', {name: /Import as inline/}).click();
+
+	await expect(
+		studio.getByText('Importing SVG markup is not supported in remotion.new', {
+			exact: true,
+		}),
+	).toBeVisible();
+	const compositionAfter = await page.evaluate(() => {
+		const browserWindow = window as typeof window & {
+			__browserStudioProject: {files: Record<string, string>};
+		};
+		return browserWindow.__browserStudioProject.files[
+			'/project/src/Composition.tsx'
+		];
+	});
+	expect(compositionAfter).toBe(compositionBefore);
+});
+
+test('clears hover backgrounds even if pointer leave events are lost', async ({
+	page,
+}) => {
+	await page.goto('/');
+	const studio = page.frameLocator('iframe');
+	await expect(studio.locator('[data-compname="MyComp"]')).toBeVisible();
+	await waitForBrowserStudioOperations(studio);
+	await studio.locator('[data-compname="MyComp"]').click();
+	const expandRightSidebar = studio.getByRole('button', {
+		name: 'Expand right sidebar',
+	});
+	if (await expandRightSidebar.isVisible()) {
+		await expandRightSidebar.click();
+	}
+
+	await studio.locator('body').evaluate(async () => {
+		await window.remotion_browserStudio.writeStaticFile({
+			contents: new TextEncoder().encode('hover test').buffer,
+			filePath: 'hover-test.txt',
+		});
+		await window.remotion_browserStudio.writeStaticFile({
+			contents: new TextEncoder().encode('folder action test').buffer,
+			filePath: 'hover-folder/inside.txt',
+		});
+	});
+
+	const addSolid = studio.getByRole('button', {name: 'Add Solid'});
+	await expect(addSolid).toBeVisible();
+
+	const getBackgroundColor = (locator: ReturnType<typeof studio.locator>) =>
+		locator.evaluate(
+			(element) => window.getComputedStyle(element).backgroundColor,
+		);
+	const getColor = (locator: ReturnType<typeof studio.locator>) =>
+		locator.evaluate((element) => window.getComputedStyle(element).color);
+	const lightText = await studio.locator('body').evaluate((body) => {
+		const probe = document.createElement('span');
+		probe.style.color = 'var(--remotion-studio-light-text)';
+		body.appendChild(probe);
+		const {color} = window.getComputedStyle(probe);
+		probe.remove();
+		return color;
+	});
+
+	await addSolid.hover();
+	await expect
+		.poll(() => getBackgroundColor(addSolid))
+		.toBe('rgba(255, 255, 255, 0.06)');
+	const neutralArea = studio.locator('[data-sidebar-toggle="right"]');
+
+	await addSolid.click();
+	const solid = studio.locator(
+		'[data-timeline-marquee-item][aria-label="<Solid>"]',
+	);
+	await expect(solid).toBeVisible();
+	await expect(studio.locator('svg[viewBox="0 0 24 16"]')).toBeVisible();
+	await studio.locator('body').press('Escape');
+	await solid.hover();
+	const hoveredOutline = studio.locator(
+		'polygon[data-remotion-studio-selected-outline-key]',
+	);
+	await expect(hoveredOutline).toHaveCount(1);
+
+	// Browsers can fail to deliver pointer leave events when the pointer
+	// exits the Studio <iframe>. Simulate this by suppressing them before
+	// they reach the app: https://github.com/remotion-dev/remotion/issues/9886
+	await studio.locator('body').evaluate((body) => {
+		const win = body.ownerDocument.defaultView as Window;
+		for (const type of [
+			'pointerout',
+			'pointerleave',
+			'mouseout',
+			'mouseleave',
+		]) {
+			win.addEventListener(type, (e) => e.stopImmediatePropagation(), {
+				capture: true,
+			});
+		}
+	});
+
+	await page.locator('iframe').dispatchEvent('pointerout');
+	await expect(hoveredOutline).toHaveCount(0, {timeout: 5000});
+	await neutralArea.hover();
+
+	await studio.getByRole('button', {name: 'Assets', exact: true}).click();
+	const assetFolder = studio.getByRole('group', {
+		name: 'hover-folder',
+		exact: true,
+	});
+	await expect(assetFolder).toBeVisible();
+	await assetFolder.hover();
+	const folderActions = assetFolder.getByRole('button', {
+		name: 'More actions',
+	});
+	await expect(folderActions).toBeVisible();
+	await folderActions.click();
+	await expect(
+		studio.getByText('Copy folder path', {exact: true}),
+	).toBeVisible();
+	await expect(studio.getByText('Upload...', {exact: true})).toBeVisible();
+	await expect(studio.getByText(/^Show in /)).toHaveCount(0);
+	await page.keyboard.press('Escape');
+
+	const assetItem = studio.getByRole('group', {
+		name: 'hover-test.txt',
+		exact: true,
+	});
+	await expect(assetItem).toBeVisible();
+	await assetItem.hover();
+	await expect
+		.poll(() => getBackgroundColor(assetItem))
+		.toBe('rgba(255, 255, 255, 0.06)');
+	const assetActions = assetItem.getByRole('button', {name: 'More actions'});
+	await assetActions.hover();
+	await expect.poll(() => getColor(assetActions)).toBe('rgb(255, 255, 255)');
+	await assetItem.hover({position: {x: 10, y: 10}});
+	await expect.poll(() => getColor(assetActions)).toBe(lightText);
+	await neutralArea.hover();
+	await expect
+		.poll(() => getBackgroundColor(assetItem))
+		.toBe('rgba(0, 0, 0, 0)');
+
+	await assetItem.click();
+	await studio.getByRole('button', {name: 'Compositions', exact: true}).click();
+	const compositionLink = studio.locator('[data-compname="MyComp"]');
+	const compositionItem = studio
+		.locator('.__remotion-hover-group')
+		.filter({has: compositionLink});
+	await compositionItem.hover();
+	await expect
+		.poll(() => getBackgroundColor(compositionItem))
+		.toBe('rgba(255, 255, 255, 0.06)');
+	const compositionActions = compositionItem.getByRole('button', {
+		name: 'More actions',
+	});
+	await compositionActions.hover();
+	await expect
+		.poll(() => getColor(compositionActions))
+		.toBe('rgb(255, 255, 255)');
+	await compositionItem.hover({position: {x: 10, y: 10}});
+	await expect.poll(() => getColor(compositionActions)).toBe(lightText);
+	await compositionActions.click();
+	await expect(studio.getByText('Copy ID', {exact: true})).toBeVisible();
+	await expect
+		.poll(() =>
+			compositionItem
+				.locator('button')
+				.evaluateAll((elements) =>
+					elements.every((element) =>
+						element.checkVisibility({checkOpacity: true}),
+					),
+				),
+		)
+		.toBe(true);
+	const contextActionBox = await compositionActions.boundingBox();
+	if (contextActionBox === null) {
+		throw new Error('Expected the context action to be visible');
+	}
+
+	await page.mouse.click(
+		contextActionBox.x + 2,
+		contextActionBox.y + contextActionBox.height / 2,
+	);
+	await expect(studio.getByText('Copy ID', {exact: true})).toBeHidden();
+	await expect(studio.getByText('hover test', {exact: true})).toBeVisible();
+	await neutralArea.hover();
+	await expect
+		.poll(() => getBackgroundColor(compositionItem))
+		.toBe('rgba(0, 0, 0, 0)');
+	await compositionLink.click();
+	await expect(addSolid).toBeVisible();
+
+	await neutralArea.hover();
+	await expect
+		.poll(() => getBackgroundColor(addSolid))
+		.toBe('rgba(0, 0, 0, 0)');
+
+	// Menubar items must reset as well
+	const fileMenu = studio.getByRole('button', {name: 'File', exact: true});
+	await fileMenu.hover();
+	await expect
+		.poll(() => getBackgroundColor(fileMenu))
+		.toBe('rgba(255, 255, 255, 0.06)');
+
+	await neutralArea.hover();
+	await expect
+		.poll(() => getBackgroundColor(fileMenu))
+		.toBe('rgba(0, 0, 0, 0)');
+});

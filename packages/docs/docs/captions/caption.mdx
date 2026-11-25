@@ -1,0 +1,87 @@
+---
+image: https://remotion.media/docs/generated/articles-docs-captions-caption.png
+title: Caption
+crumb: '@remotion/captions'
+no_ai: true
+---
+
+# Caption<AvailableFrom v="4.0.216"/>
+
+This type is the recommended data structure for how you deal with a caption in Remotion.
+
+```tsx twoslash
+import type {Caption} from '@remotion/captions';
+//            ^?
+```
+
+By using this standard data structure, you can use many APIs from Remotion that all use this standard:
+
+- [Parsing](/docs/captions/importing): [`parseSrt()`](/docs/captions/parse-srt) for `.srt` files or [`parseVtt()`](/docs/captions/parse-vtt) for `.vtt` files
+- [Transcription](/docs/captions/transcribing): [`@remotion/whisper-webgpu`](/docs/whisper-webgpu), [`@remotion/install-whisper-cpp`](/docs/install-whisper-cpp), [`@remotion/openai-whisper`](/docs/openai-whisper) and [`@remotion/elevenlabs`](/docs/elevenlabs) packages
+- Layouting: Creating pages using [`createTikTokStyleCaptions()`](/docs/captions/create-tiktok-style-captions) or [`fillTextBox()`](/docs/layout-utils/fill-text-box)
+- [Editing](/docs/captions/editing): Edit captions interactively in the Studio
+- [Styling](/docs/captions/styling): Use existing caption [style presets](/elements/#element-category-captions)
+- Serializing: To a `.srt` file using [`serializeSrt()`](/docs/captions/serialize-srt)
+- Agent-readiness: The <Skill>/remotion-captions</Skill> skill is designed around this type.
+
+## Fields
+
+### `text`
+
+_string_
+
+The text of the caption.
+
+### `startMs`
+
+_number_
+
+The start time of the caption in milliseconds.
+
+### `endMs`
+
+_number_
+
+The end time of the caption in milliseconds.
+
+### `timestampMs`
+
+_number | null_
+
+The timestamp of the caption as a singular timestamp in milliseconds.
+When using [`@remotion/install-whisper-cpp`](/docs/install-whisper-cpp) or [`@remotion/whisper-web`](/docs/whisper-web), this is the `t_dtw` value converted to milliseconds, or `null` if it is not available.
+Other built-in sources set it to the midpoint between `startMs` and `endMs`.
+
+### `confidence`
+
+_number | null_
+
+A number between 0 and 1 that indicates how confident the transcription is, or `null` if no confidence value is available.
+[`parseSrt()`](/docs/captions/parse-srt) and [`parseVtt()`](/docs/captions/parse-vtt) set it to `1`.
+
+### `pageBreakAfter?`<AvailableFrom v="4.0.517" />
+
+_boolean_
+
+When `true`, forces a page break after this caption.
+
+[`createTikTokStyleCaptions()`](/docs/captions/create-tiktok-style-captions) ends the current page after this caption, so the next caption starts a new page. [`serializeSrt()`](/docs/captions/serialize-srt) starts a new subtitle cue.
+
+This field does not change caption timing. When it is `false` or omitted, page breaks are determined automatically.
+
+## Whitespace sensitivity
+
+The [`text`](#text) field is whitespace sensitive. You should include spaces in it, ideally before each word.
+
+While rendering, apply the [`white-space: pre`](https://developer.mozilla.org/en-US/docs/Web/CSS/white-space) CSS property to the container of the caption to ensure that the spaces are preserved.
+
+## Compatibility
+
+<CompatibilityTable chrome firefox safari nodejs bun serverlessFunctions clientSideRendering serverSideRendering player studio />
+
+`Caption` is a TypeScript type describing plain data and has no runtime requirements.
+
+## See also
+
+- [Source code for this type](https://github.com/remotion-dev/remotion/blob/main/packages/captions/src/caption.ts)
+- [`@remotion/captions`](/docs/captions/api)

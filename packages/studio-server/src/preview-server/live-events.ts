@@ -1,0 +1,223 @@
+import type {
+	IncomingMessage,
+	OutgoingHttpHeaders,
+	ServerResponse,
+} from 'node:http';
+import type {LogLevel} from '@remotion/renderer';
+import type {EventSourceEvent} from '@remotion/studio-shared';
+import {
+	getSourceVersionSessionId,
+	getFileWatcherRegistry,
+	subscribeToExternalSourceChanges,
+} from '../file-watcher';
+import {printServerReadyComment} from '../server-ready';
+import {unsubscribeClientDefaultPropsWatchers} from './default-props-watchers';
+import {unsubscribeClientFileExistenceWatchers} from './file-existence-watchers';
+import {unsubscribeClientSequencePropsWatchers} from './sequence-props-watchers';
+
+type Client = {
+	id: string;
+	response: ServerResponse;
+};
+
+export type LiveEventsServer = {
+	getClientIds: () => string[];
+	sendEventToClient: (event: EventSourceEvent) => void;
+	sendEventToClientId: (clientId: string, event: EventSourceEvent) => boolean;
+	router: (request: IncomingMessage, response: ServerResponse) => Promise<void>;
+	closeConnections: () => Promise<void>;
+	addNewClientListener: (cb: () => void) => () => void;
+};
+
+const serializeMessage = (message: EventSourceEvent) => {
+	return `data: ${JSON.stringify(message)}\n\n`;
+};
+
+let printPortMessageTimeout: Timer | null = null;
+const configChangeListeners = new Set<() => void>();
+
+export const subscribeToConfigChanges = (
+	onChange: () => void,
+): (() => void) => {
+	configChangeListeners.add(onChange);
+	return () => {
+		configChangeListeners.delete(onChange);
+	};
+};
+
+export const clearPrintPortMessageTimeout = () => {
+	if (printPortMessageTimeout) {
+		clearTimeout(printPortMessageTimeout);
+		printPortMessageTimeout = null;
+	}
+};
+
+export type InitialUndoRedoState = {
+	undoFile: string | null;
+	redoFile: string | null;
+};
+
+export const makeLiveEventsRouter = (
+	logLevel: LogLevel,
+	getInitialUndoRedoState: () => InitialUndoRedoState,
+): LiveEventsServer => {
+	let clients: Client[] = [];
+	let newClientListeners: (() => void)[] = [];
+
+	const router = (
+		request: IncomingMessage,
+		response: ServerResponse,
+	): Promise<void> => {
+		const headers: OutgoingHttpHeaders = {
+			'content-type': 'text/event-stream;charset=utf-8',
+			connection: 'keep-alive',
+			'cache-control': 'no-cache',
+		};
+
+		response.writeHead(200, headers);
+		response.write('\n');
+		if (request.method === 'OPTIONS') {
+			response.end();
+			return Promise.resolve();
+		}
+
+		const clientId = String(Math.random());
+		const {undoFile, redoFile} = getInitialUndoRedoState();
+		response.write(
+			serializeMessage({
+				type: 'init',
+				clientId,
+				undoFile,
+				redoFile,
+				sourceVersionSessionId: getSourceVersionSessionId(),
+			}),
+		);
+
+		const newClient = {
+			id: clientId,
+			response,
+		};
+		const sessionId = getSourceVersionSessionId();
+		if (sessionId !== null) {
+			for (const [fileName, revision] of Object.entries(
+				getFileWatcherRegistry().getExternalSourceRevisions(),
+			)) {
+				response.write(
+					serializeMessage({
+						type: 'external-source-changed',
+						resetUndoHistory: false,
+						fileName,
+						sourceVersion: {sessionId, revision},
+					}),
+				);
+			}
+		}
+
+		clients.push(newClient);
+		newClientListeners.forEach((cb) => cb());
+		clearPrintPortMessageTimeout();
+
+		request.on('close', () => {
+			unsubscribeClientDefaultPropsWatchers(clientId);
+			unsubscribeClientFileExistenceWatchers(clientId);
+			unsubscribeClientSequencePropsWatchers(clientId);
+			clients = clients.filter((client) => client.id !== clientId);
+
+			// If all clients disconnected, print a comment so user can easily restart it.
+			if (clients.length === 0) {
+				clearPrintPortMessageTimeout();
+
+				printPortMessageTimeout = setTimeout(() => {
+					printServerReadyComment('To restart', logLevel);
+				}, 2500);
+			}
+		});
+
+		return Promise.resolve();
+	};
+
+	const sendEventToClient = (event: EventSourceEvent) => {
+		if (event.type === 'config-file-changed') {
+			configChangeListeners.forEach((listener) => listener());
+		}
+
+		clients.forEach((client) => {
+			client.response.write(serializeMessage(event));
+		});
+	};
+
+	const sendEventToClientId = (clientId: string, event: EventSourceEvent) => {
+		const client = clients.find((c) => c.id === clientId);
+		if (!client) {
+			return false;
+		}
+
+		client.response.write(serializeMessage(event));
+		return true;
+	};
+
+	const addNewClientListener = (cb: () => void) => {
+		newClientListeners.push(cb);
+		return () => {
+			newClientListeners = newClientListeners.filter((l) => l !== cb);
+		};
+	};
+
+	return {
+		getClientIds: () => clients.map((client) => client.id),
+		sendEventToClient,
+		sendEventToClientId,
+		router,
+		addNewClientListener,
+		closeConnections: () => {
+			return Promise.all(
+				clients.map((client) => {
+					return new Promise<void>((resolve) => {
+						client.response.end(() => {
+							resolve();
+						});
+					});
+				}),
+			).then(() => undefined);
+		},
+	};
+};
+
+type Waiter = (list: LiveEventsServer) => void;
+let liveEventsListener: LiveEventsServer | null = null;
+
+const waiters: Waiter[] = [];
+
+export const waitForLiveEventsListener = (): Promise<LiveEventsServer> => {
+	if (liveEventsListener) {
+		return Promise.resolve(liveEventsListener);
+	}
+
+	return new Promise<LiveEventsServer>((resolve) => {
+		waiters.push((list: LiveEventsServer) => {
+			resolve(list);
+		});
+	});
+};
+
+export const getLiveEventsListener = (): LiveEventsServer | null =>
+	liveEventsListener;
+
+export const setLiveEventsListener = (listener: LiveEventsServer) => {
+	liveEventsListener = listener;
+	const unsubscribe = subscribeToExternalSourceChanges(
+		(fileName, sourceVersion) => {
+			listener.sendEventToClient({
+				type: 'external-source-changed',
+				resetUndoHistory: false,
+				fileName,
+				sourceVersion,
+			});
+		},
+	);
+	waiters.forEach((w) => w(listener));
+	return () => {
+		unsubscribe();
+		liveEventsListener = null;
+	};
+};

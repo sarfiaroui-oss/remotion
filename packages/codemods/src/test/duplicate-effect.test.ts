@@ -1,0 +1,97 @@
+import {expect, test} from 'bun:test';
+import {duplicateEffect, duplicateEffects} from '../effect-operations';
+import {lineColumnToNodePath} from './node-path-test-utils';
+
+const buildInput = (
+	effects: string,
+) => `import {HtmlInCanvas} from '@remotion/html-in-canvas';
+import {blur} from '@remotion/effects/blur';
+import {brightness} from '@remotion/effects/brightness';
+import {tint} from '@remotion/effects/tint';
+
+export const Comp = () => {
+	return (
+		<HtmlInCanvas effects={${effects}}>
+			hi
+		</HtmlInCanvas>
+	);
+};
+`;
+
+test('duplicateEffect clones the targeted effect after itself', () => {
+	const input = buildInput(
+		'[blur({radius: 5}), tint({color: "red"}), brightness({amount: 2})]',
+	);
+	const {output, effectLabel} = duplicateEffect({
+		input,
+		sequenceNodePath: lineColumnToNodePath(input, 8),
+		effectIndex: 1,
+	});
+
+	expect(effectLabel).toBe('tint()');
+	expect(output.indexOf('blur({')).toBeLessThan(output.indexOf('tint({'));
+	expect(output.match(/tint\(\{\s*color: ['"]red['"],?\s*\}\)/g)).toHaveLength(
+		2,
+	);
+	expect(output.lastIndexOf('tint({')).toBeLessThan(
+		output.indexOf('brightness({'),
+	);
+});
+
+test('duplicateEffects clones multiple targeted effects in one pass', () => {
+	const input = buildInput(
+		'[blur({radius: 5}), tint({color: "red"}), brightness({amount: 2})]',
+	);
+	const {output, effectLabels} = duplicateEffects({
+		input,
+		effects: [
+			{
+				sequenceNodePath: lineColumnToNodePath(input, 8),
+				effectIndex: 0,
+			},
+			{
+				sequenceNodePath: lineColumnToNodePath(input, 8),
+				effectIndex: 2,
+			},
+		],
+	});
+
+	expect(effectLabels).toEqual(['blur()', 'brightness()']);
+	expect(output.match(/blur\(\{\s*radius: 5,?\s*\}\)/g)).toHaveLength(2);
+	expect(output.match(/brightness\(\{\s*amount: 2,?\s*\}\)/g)).toHaveLength(2);
+	expect(output.indexOf('blur({')).toBeLessThan(output.indexOf('tint({'));
+	expect(output.indexOf('tint({')).toBeLessThan(output.indexOf('brightness({'));
+});
+
+test('duplicateEffect throws when effect index is out of range', () => {
+	const input = buildInput('[tint({color: "red"})]');
+	expect(() =>
+		duplicateEffect({
+			input,
+			sequenceNodePath: lineColumnToNodePath(input, 8),
+			effectIndex: 5,
+		}),
+	).toThrow(/not-found/);
+});
+
+test('duplicateEffect throws when effects are not an inline array', () => {
+	const input = buildInput('effects');
+	expect(() =>
+		duplicateEffect({
+			input,
+			sequenceNodePath: lineColumnToNodePath(input, 8),
+			effectIndex: 0,
+		}),
+	).toThrow(/not an array/);
+});
+
+test('duplicateEffect throws when the target effect is unsupported', () => {
+	const input = buildInput('[tint({color: "red"}), ...effects]');
+	expect(() =>
+		duplicateEffect({
+			input,
+			sequenceNodePath: lineColumnToNodePath(input, 8),
+			effectIndex: 1,
+		}),
+	).toThrow(/not-call-expression/);
+});

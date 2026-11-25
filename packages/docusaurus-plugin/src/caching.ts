@@ -1,0 +1,82 @@
+/* eslint-disable no-console */
+import {createRequire} from 'module';
+import {resolve} from 'path';
+import {
+	rendererClassic,
+	createTransformerFactory,
+} from '@shikijs/twoslash/core';
+import type {HighlighterGeneric} from 'shiki/core';
+import {createDocsTwoslasher} from './docs-twoslasher';
+import {
+	createTwoslashCacheContext,
+	getTwoslashCacheKey,
+	getTwoslashVersions,
+	readTwoslashCacheEntry,
+	TWOSLASH_EXPLICIT_TRIGGER,
+	TWOSLASH_THEME,
+	writeTwoslashCacheEntry,
+} from './twoslash-cache';
+
+let cachedTwoslasher: ReturnType<typeof createDocsTwoslasher> | null = null;
+let cacheContext: ReturnType<typeof createTwoslashCacheContext> | null = null;
+
+function getTwoslasher() {
+	if (!cachedTwoslasher) {
+		cachedTwoslasher = createDocsTwoslasher({
+			rootDirectory: resolve(process.cwd()),
+		});
+		process.once('exit', cachedTwoslasher.dispose);
+	}
+
+	return cachedTwoslasher.twoslasher;
+}
+
+const getCacheContext = () => {
+	if (!cacheContext) {
+		const packageRequire = createRequire(__filename);
+		cacheContext = createTwoslashCacheContext({
+			docsRoot: resolve(process.cwd()),
+			versions: getTwoslashVersions(packageRequire.resolve),
+		});
+	}
+
+	return cacheContext;
+};
+
+/**
+ * Keeps a local cache of the final HTML in node_modules/.cache/twoslash-native.
+ */
+export const cachedTwoslashCall = (
+	code: string,
+	lang: string,
+	// eslint-disable-next-line @typescript-eslint/no-explicit-any
+	highlighter: HighlighterGeneric<any, any>,
+): string => {
+	const context = getCacheContext();
+	const key = getTwoslashCacheKey({code, lang, context});
+	const cached = readTwoslashCacheEntry({context, key});
+	if (cached !== null) {
+		if (process.env.debug) {
+			console.log(`Using cached Twoslash result ${key}`);
+		}
+
+		return cached;
+	}
+
+	const twoslasher = getTwoslasher();
+	const html = highlighter.codeToHtml(code, {
+		lang,
+		theme: TWOSLASH_THEME,
+		transformers: [
+			createTransformerFactory(
+				twoslasher,
+				rendererClassic(),
+			)({
+				explicitTrigger: TWOSLASH_EXPLICIT_TRIGGER,
+			}),
+		],
+	});
+
+	writeTwoslashCacheEntry({context, key, html});
+	return html;
+};

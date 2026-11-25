@@ -1,0 +1,437 @@
+import React, {useCallback, useContext, useMemo, useState} from 'react';
+import type {CanUpdateSequencePropStatusStatic} from 'remotion';
+import type {
+	SchemaFieldInfo,
+	TimelineFieldOnDragEnd,
+	TimelineFieldOnDragValueChange,
+	TimelineFieldOnSave,
+} from '../../helpers/timeline-layout';
+import {InputDragger} from '../NewComposition/InputDragger';
+import {formatTimelineFieldValueForDisplay} from './timeline-field-display-utils';
+import {
+	getTimelineDisplayDecimalPlaces,
+	normalizeTimelineNumber,
+} from './timeline-field-utils';
+import {UnsupportedStatus} from './TimelineSchemaField';
+import {
+	parseTransformOrigin,
+	parseTransformOriginZ,
+	parsedTransformOriginToPercent,
+	serializeTransformOrigin,
+	transformOriginPercentToUv,
+} from './transform-origin-utils';
+import {Transform3DModeContext} from './Transform3DModeContext';
+import {useTimelineFieldEdit} from './use-timeline-field-edit';
+
+const leftDraggerStyle: React.CSSProperties = {
+	paddingLeft: 0,
+};
+
+const rightDraggerStyle: React.CSSProperties = {
+	paddingRight: 0,
+};
+
+const containerStyle: React.CSSProperties = {
+	display: 'flex',
+	gap: 4,
+};
+
+export const TimelineTransformOriginField: React.FC<{
+	readonly field: SchemaFieldInfo;
+	readonly propStatus: CanUpdateSequencePropStatusStatic;
+	readonly effectiveValue: unknown;
+	readonly onSave: TimelineFieldOnSave;
+	readonly onDragValueChange: TimelineFieldOnDragValueChange;
+	readonly onDragEnd: TimelineFieldOnDragEnd;
+}> = ({
+	field,
+	propStatus,
+	effectiveValue,
+	onSave,
+	onDragValueChange,
+	onDragEnd,
+}) => {
+	const {markEdit, finishEdit} = useTimelineFieldEdit();
+	const [dragX, setDragX] = useState<number | null>(null);
+	const [dragY, setDragY] = useState<number | null>(null);
+	const [dragZ, setDragZ] = useState<number | null>(null);
+	const transform3DMode = useContext(Transform3DModeContext);
+
+	const parsed = useMemo(
+		() => parseTransformOrigin(effectiveValue),
+		[effectiveValue],
+	);
+	const percent = useMemo(
+		() => (parsed === null ? null : parsedTransformOriginToPercent(parsed)),
+		[parsed],
+	);
+	const parsedZ = useMemo(
+		() =>
+			parsed?.z === null || parsed?.z === undefined
+				? null
+				: parseTransformOriginZ(parsed.z),
+		[parsed?.z],
+	);
+	const show3D = transform3DMode || (parsedZ !== null && parsedZ.value !== 0);
+
+	const configuredStep =
+		field.fieldSchema.type === 'transform-origin'
+			? field.fieldSchema.step
+			: undefined;
+	const step = configuredStep ?? 1;
+
+	const decimalPlaces = useMemo(
+		() =>
+			getTimelineDisplayDecimalPlaces({
+				defaultDecimalPlaces: 2,
+				step: configuredStep,
+			}),
+		[configuredStep],
+	);
+
+	const formatter = useCallback(
+		(v: number | string) => {
+			return formatTimelineFieldValueForDisplay({
+				fieldSchema: field.fieldSchema,
+				value: v,
+			});
+		},
+		[field.fieldSchema],
+	);
+
+	const serialize = useCallback(
+		(x: number, y: number, z = parsed?.z ?? null) => {
+			return serializeTransformOrigin({
+				uv: transformOriginPercentToUv([x, y]),
+				z,
+				decimalPlaces,
+			});
+		},
+		[decimalPlaces, parsed?.z],
+	);
+	const serializeZ = useCallback(
+		(value: number) => {
+			return `${normalizeTimelineNumber(value)}${parsedZ?.unit ?? 'px'}`;
+		},
+		[parsedZ?.unit],
+	);
+
+	const onValueChangeCancel = useCallback(() => {
+		markEdit();
+		setDragX(null);
+		setDragY(null);
+		setDragZ(null);
+		onDragEnd('cancel');
+	}, [markEdit, onDragEnd]);
+
+	const onXChange = useCallback(
+		(newVal: number) => {
+			markEdit();
+			if (percent === null) {
+				return;
+			}
+
+			setDragX(newVal);
+			const currentY = dragY ?? percent[1];
+			onDragValueChange(serialize(newVal, currentY));
+		},
+		[dragY, onDragValueChange, percent, serialize, markEdit],
+	);
+
+	const onXChangeEnd = useCallback(
+		(newVal: number) => {
+			markEdit();
+			if (percent === null) {
+				return;
+			}
+
+			const currentY = dragY ?? percent[1];
+			const value = serialize(newVal, currentY);
+			if (value !== propStatus.codeValue) {
+				finishEdit(onSave(value), () => {
+					setDragX(null);
+					onDragEnd('commit');
+				});
+			} else {
+				setDragX(null);
+				onDragEnd('cancel');
+			}
+		},
+		[
+			dragY,
+			onDragEnd,
+			onSave,
+			percent,
+			propStatus.codeValue,
+			serialize,
+			markEdit,
+			finishEdit,
+		],
+	);
+
+	const onXTextChange = useCallback(
+		(newVal: string) => {
+			if (percent === null) {
+				return;
+			}
+
+			const parsedValue = Number(newVal);
+			if (!Number.isNaN(parsedValue)) {
+				const currentY = dragY ?? percent[1];
+				const value = serialize(parsedValue, currentY);
+				if (value !== propStatus.codeValue) {
+					markEdit();
+					setDragX(parsedValue);
+					finishEdit(onSave(value), () => {
+						setDragX(null);
+					});
+				}
+			}
+		},
+		[
+			dragY,
+			onSave,
+			percent,
+			propStatus.codeValue,
+			serialize,
+			markEdit,
+			finishEdit,
+		],
+	);
+
+	const onYChange = useCallback(
+		(newVal: number) => {
+			markEdit();
+			if (percent === null) {
+				return;
+			}
+
+			setDragY(newVal);
+			const currentX = dragX ?? percent[0];
+			onDragValueChange(serialize(currentX, newVal));
+		},
+		[dragX, onDragValueChange, percent, serialize, markEdit],
+	);
+
+	const onYChangeEnd = useCallback(
+		(newVal: number) => {
+			markEdit();
+			if (percent === null) {
+				return;
+			}
+
+			const currentX = dragX ?? percent[0];
+			const value = serialize(currentX, newVal);
+			if (value !== propStatus.codeValue) {
+				finishEdit(onSave(value), () => {
+					setDragY(null);
+					onDragEnd('commit');
+				});
+			} else {
+				setDragY(null);
+				onDragEnd('cancel');
+			}
+		},
+		[
+			dragX,
+			onDragEnd,
+			onSave,
+			percent,
+			propStatus.codeValue,
+			serialize,
+			markEdit,
+			finishEdit,
+		],
+	);
+
+	const onYTextChange = useCallback(
+		(newVal: string) => {
+			if (percent === null) {
+				return;
+			}
+
+			const parsedValue = Number(newVal);
+			if (!Number.isNaN(parsedValue)) {
+				const currentX = dragX ?? percent[0];
+				const value = serialize(currentX, parsedValue);
+				if (value !== propStatus.codeValue) {
+					markEdit();
+					setDragY(parsedValue);
+					finishEdit(onSave(value), () => {
+						setDragY(null);
+					});
+				}
+			}
+		},
+		[
+			dragX,
+			onSave,
+			percent,
+			propStatus.codeValue,
+			serialize,
+			markEdit,
+			finishEdit,
+		],
+	);
+
+	const onZChange = useCallback(
+		(newVal: number) => {
+			markEdit();
+			if (percent === null) {
+				return;
+			}
+
+			setDragZ(newVal);
+			onDragValueChange(
+				serialize(dragX ?? percent[0], dragY ?? percent[1], serializeZ(newVal)),
+			);
+		},
+		[dragX, dragY, onDragValueChange, percent, serialize, serializeZ, markEdit],
+	);
+
+	const onZChangeEnd = useCallback(
+		(newVal: number) => {
+			markEdit();
+			if (percent === null) {
+				return;
+			}
+
+			const value = serialize(
+				dragX ?? percent[0],
+				dragY ?? percent[1],
+				serializeZ(newVal),
+			);
+			if (value !== propStatus.codeValue) {
+				finishEdit(onSave(value), () => {
+					setDragZ(null);
+					onDragEnd('commit');
+				});
+			} else {
+				setDragZ(null);
+				onDragEnd('cancel');
+			}
+		},
+		[
+			dragX,
+			dragY,
+			onDragEnd,
+			onSave,
+			percent,
+			propStatus.codeValue,
+			serialize,
+			serializeZ,
+			markEdit,
+			finishEdit,
+		],
+	);
+
+	const onZTextChange = useCallback(
+		(newVal: string) => {
+			if (percent === null) {
+				return;
+			}
+
+			const parsedValue = Number(newVal);
+			if (!Number.isNaN(parsedValue)) {
+				const value = serialize(
+					dragX ?? percent[0],
+					dragY ?? percent[1],
+					serializeZ(parsedValue),
+				);
+				if (value !== propStatus.codeValue) {
+					markEdit();
+					setDragZ(parsedValue);
+					finishEdit(onSave(value), () => setDragZ(null));
+				}
+			}
+		},
+		[
+			dragX,
+			dragY,
+			onSave,
+			percent,
+			propStatus.codeValue,
+			serialize,
+			serializeZ,
+			markEdit,
+			finishEdit,
+		],
+	);
+
+	if (percent === null) {
+		return (
+			<UnsupportedStatus label="unsupported origin" formattedValue={false} />
+		);
+	}
+
+	return (
+		<span style={containerStyle}>
+			<InputDragger
+				onValueChangeCancel={onValueChangeCancel}
+				type="number"
+				value={dragX ?? percent[0]}
+				buttonStyle={leftDraggerStyle}
+				style={leftDraggerStyle}
+				status="ok"
+				small
+				onValueChange={onXChange}
+				onValueChangeEnd={onXChangeEnd}
+				onTextChange={onXTextChange}
+				min={-Infinity}
+				max={Infinity}
+				step={step}
+				formatter={formatter}
+				rightAlign={false}
+				snapToStep={false}
+				dragDecimalPlaces={decimalPlaces}
+				aria-label="Transform origin X"
+			/>
+			<div style={{marginLeft: -6, marginRight: -6}} />
+			<InputDragger
+				onValueChangeCancel={onValueChangeCancel}
+				type="number"
+				value={dragY ?? percent[1]}
+				buttonStyle={rightDraggerStyle}
+				style={rightDraggerStyle}
+				status="ok"
+				small
+				onValueChange={onYChange}
+				onValueChangeEnd={onYChangeEnd}
+				onTextChange={onYTextChange}
+				min={-Infinity}
+				max={Infinity}
+				step={step}
+				formatter={formatter}
+				rightAlign={false}
+				snapToStep={false}
+				dragDecimalPlaces={decimalPlaces}
+				aria-label="Transform origin Y"
+			/>
+			{show3D ? (
+				<>
+					<div style={{marginLeft: -6, marginRight: -6}} />
+					<InputDragger
+						onValueChangeCancel={onValueChangeCancel}
+						type="number"
+						value={dragZ ?? parsedZ?.value ?? 0}
+						buttonStyle={rightDraggerStyle}
+						style={rightDraggerStyle}
+						status="ok"
+						small
+						onValueChange={onZChange}
+						onValueChangeEnd={onZChangeEnd}
+						onTextChange={onZTextChange}
+						min={-Infinity}
+						max={Infinity}
+						step={step}
+						formatter={(value) => `${value}${parsedZ?.unit ?? 'px'}`}
+						rightAlign={false}
+						snapToStep={false}
+						dragDecimalPlaces={decimalPlaces}
+						aria-label="Transform origin Z"
+					/>
+				</>
+			) : null}
+		</span>
+	);
+};

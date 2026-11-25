@@ -1,0 +1,63 @@
+---
+image: https://remotion.media/docs/generated/articles-docs-contributing-rust.png
+title: Contributing Rust code
+sidebar_label: Rust code
+crumb: Contributing
+---
+
+:::note
+As we migrate to the [new media tags](/docs/mediabunny/new-video), we will not add any new Rust code, only maintain the existing code.
+:::
+
+To participate in the development of the Rust parts of Remotion, you need to do additional steps.  
+These are entirely optional if you only touch the TypeScript parts.
+
+## Setup
+
+First, install Cargo, if you don't have it, or upgrade to a version that supports `edition-2021`:
+
+```sh
+curl https://sh.rustup.rs -sSf | sh
+```
+
+## Building
+
+To build the Rust parts for your operating system, run:
+
+```sh
+cd packages/compositor
+bun build.ts --debug
+```
+
+## Building for all platforms
+
+These instructions currently are for macOS. Contributions for other platforms are appreciated.
+
+To build the Rust binaries for all supported platforms, you need to install their toolchains:
+
+```sh
+cd packages/compositor
+bun install-toolchain.ts
+```
+
+You can then build all binaries with:
+
+```
+bun run build-all
+```
+
+The resulting artifacts should be checked into Git.
+
+## Architecture
+
+### Development workflow
+
+- Remotion has platform specific packages like `compositor-darwin-arm64` and a user will only install packages that are specific to their operating system.
+- The Rust code will be compiled into your native `compositor` package by default, unless you compile for all platforms.
+- Resulting binaries are committed to Git so that people who don't setup Rust can develop too.
+
+### FFmpeg bindings
+
+- Both the Rust binary as well as the FFmpeg binaries use the shared libraries located in the folder of each compositor package.
+- The FFmpeg build recipes, generated C bindings and safe Rust wrapper live in [`packages/compositor/ffmpeg`](https://github.com/remotion-dev/remotion/tree/main/packages/compositor/ffmpeg). Cargo uses local path dependencies between these crates.
+- The compositor build downloads the required precompiled FFmpeg archive on demand and verifies its SHA-256 checksum. Regular dependency installation and TypeScript builds do not download these archives. See the [FFmpeg README](https://github.com/remotion-dev/remotion/tree/main/packages/compositor/ffmpeg#readme) for building FFmpeg and updating all supported platforms.

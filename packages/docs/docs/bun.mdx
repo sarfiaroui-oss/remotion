@@ -1,0 +1,37 @@
+---
+image: https://remotion.media/docs/generated/articles-docs-bun.png
+id: bun
+crumb: bun bun bun bun bun
+title: Bun support
+---
+
+Remotion supports [Bun](https://bun.com).
+
+## As a package manager
+
+You can use `bun i` to initialize all Remotion templates.  
+To scaffold a new project with bun, use:
+
+```
+bun create video
+```
+
+This command sets all scripts to use [`bunx remotionb`](/docs/cli/#using-bun) which will use Bun as a runtime.  
+Change `remotionb` to `remotion` if you want to use Node.js as a runtime.
+
+## Remotion CLI
+
+If you want to run the Remotion CLI using Bun, **use `remotionb` instead of the `remotion` command**.  
+It doesn't matter if you prefix `remotionb` with `npx`, `bunx` or another runner command.
+
+```
+npx remotionb render
+```
+
+## For contributors
+
+Start the example testbed using `bun run start-bun`.
+
+## See also
+
+- [Deno support](/docs/deno)

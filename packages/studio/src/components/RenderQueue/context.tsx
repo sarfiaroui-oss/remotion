@@ -1,0 +1,865 @@
+import type {CompletedClientRender, RenderJob} from '@remotion/studio-shared';
+import React, {
+	createRef,
+	useCallback,
+	useContext,
+	useLayoutEffect,
+	useEffect,
+	useImperativeHandle,
+	useMemo,
+	useRef,
+	useState,
+} from 'react';
+import {getBrowserStudioOperations} from '../../helpers/browser-studio-operations';
+import {StudioServerConnectionCtx} from '../../helpers/client-id';
+import type {
+	AddCaptionJobParams,
+	CaptionJob,
+	CaptionJobProgress,
+} from './caption-job-types';
+import {
+	type AddClientStillJobParams,
+	type AddClientVideoJobParams,
+	type CompositionRef,
+	cancelAbortController,
+	cleanupCompositionForJob,
+	deleteAbortController,
+	generateJobId,
+	getAbortController,
+	getCompositionForJob,
+	registerCompositionForJob,
+} from './client-render-queue';
+import type {
+	ClientRenderJob,
+	ClientRenderJobProgress,
+	ClientStillRenderJob,
+	ClientVideoRenderJob,
+	LocalRenderOutput,
+	RestoredClientRenderJob,
+} from './client-side-render-types';
+import {
+	canApplyLocalJobEvent,
+	isLocalJobActive,
+	isLocalJobBusy,
+	transitionLocalJobs,
+} from './local-job-machine';
+import {createRenderCancellationStore} from './render-cancellation';
+import type {
+	AddVideoMattingJobParams,
+	VideoMattingJob,
+	VideoMattingJobProgress,
+} from './video-matting-job-types';
+
+declare global {
+	interface Window {
+		remotion_initialRenderQueue: RenderJob[] | null;
+		remotion_initialClientRenders: CompletedClientRender[] | null;
+	}
+}
+
+const restorePersistedClientRenders = (): RestoredClientRenderJob[] => {
+	const persisted = window.remotion_initialClientRenders ?? [];
+	return persisted.map(
+		(r): RestoredClientRenderJob => ({...r, status: 'done', localOutput: null}),
+	);
+};
+
+export type AnyRenderJob = RenderJob | ClientRenderJob;
+
+export const isClientRenderJob = (
+	job: AnyRenderJob,
+): job is ClientRenderJob => {
+	return job.type === 'client-still' || job.type === 'client-video';
+};
+
+type RenderQueueContextType = {
+	jobs: AnyRenderJob[];
+	serverJobs: RenderJob[];
+	clientJobs: ClientRenderJob[];
+	captionJobs: CaptionJob[];
+	videoMattingJobs: VideoMattingJob[];
+	addClientStillJob: (
+		params: AddClientStillJobParams,
+		compositionRef: CompositionRef,
+	) => string;
+	addClientVideoJob: (
+		params: AddClientVideoJobParams,
+		compositionRef: CompositionRef,
+	) => string;
+	updateClientJobProgress: (
+		jobId: string,
+		progress: ClientRenderJobProgress,
+	) => void;
+	markClientJobSaving: (jobId: string) => void;
+	markClientJobDone: (
+		jobId: string,
+		metadata: CompletedClientRender['metadata'],
+		localOutput: LocalRenderOutput | null,
+	) => void;
+	markClientJobFailed: (jobId: string, error: Error) => void;
+	markClientJobCancelled: (jobId: string) => void;
+	removeClientJob: (jobId: string) => void;
+	cancelClientJob: (jobId: string) => void;
+	setProcessJobCallback: (
+		callback: ((job: ClientRenderJob) => Promise<void>) | null,
+	) => void;
+	addCaptionJob: (params: AddCaptionJobParams) => string;
+	updateCaptionJobProgress: (
+		jobId: string,
+		progress: CaptionJobProgress,
+	) => void;
+	markCaptionJobDone: (jobId: string, captionCount: number) => void;
+	markCaptionJobFailed: (jobId: string, error: Error) => void;
+	markCaptionJobCancelled: (jobId: string) => void;
+	markCaptionJobSaving: (jobId: string) => void;
+	removeCaptionJob: (jobId: string) => void;
+	setProcessCaptionJobCallback: (
+		callback: ((job: CaptionJob) => Promise<void>) | null,
+	) => void;
+	addVideoMattingJob: (params: AddVideoMattingJobParams) => string;
+	updateVideoMattingJobProgress: (
+		jobId: string,
+		progress: VideoMattingJobProgress,
+	) => void;
+	markVideoMattingJobDone: (jobId: string) => void;
+	markVideoMattingJobFailed: (jobId: string, error: Error) => void;
+	markVideoMattingJobCancelled: (jobId: string) => void;
+	markVideoMattingJobSaving: (jobId: string) => void;
+	removeVideoMattingJob: (jobId: string) => void;
+	setProcessVideoMattingJobCallback: (
+		callback: ((job: VideoMattingJob) => Promise<void>) | null,
+	) => void;
+	getAbortController: (jobId: string) => AbortController;
+	getCompositionForJob: (jobId: string) => CompositionRef | undefined;
+};
+
+const noopString = () => '';
+const noop = () => undefined;
+
+export const RenderQueueContext = React.createContext<RenderQueueContextType>({
+	jobs: [],
+	serverJobs: [],
+	clientJobs: [],
+	captionJobs: [],
+	videoMattingJobs: [],
+	addClientStillJob: noopString,
+	addClientVideoJob: noopString,
+	updateClientJobProgress: noop,
+	markClientJobSaving: noop,
+	markClientJobDone: noop,
+	markClientJobFailed: noop,
+	markClientJobCancelled: noop,
+	removeClientJob: noop,
+	cancelClientJob: noop,
+	setProcessJobCallback: noop,
+	addCaptionJob: noopString,
+	updateCaptionJobProgress: noop,
+	markCaptionJobDone: noop,
+	markCaptionJobFailed: noop,
+	markCaptionJobCancelled: noop,
+	markCaptionJobSaving: noop,
+	removeCaptionJob: noop,
+	setProcessCaptionJobCallback: noop,
+	addVideoMattingJob: noopString,
+	updateVideoMattingJobProgress: noop,
+	markVideoMattingJobDone: noop,
+	markVideoMattingJobFailed: noop,
+	markVideoMattingJobCancelled: noop,
+	markVideoMattingJobSaving: noop,
+	removeVideoMattingJob: noop,
+	setProcessVideoMattingJobCallback: noop,
+	getAbortController: () => new AbortController(),
+	getCompositionForJob: () => undefined,
+});
+
+export const RenderQueueActionsContext = React.createContext<
+	Pick<
+		ReturnType<typeof createRenderCancellationStore>,
+		| 'getJobs'
+		| 'cancelJob'
+		| 'canCancelJob'
+		| 'isCancelling'
+		| 'subscribeToCancellation'
+	>
+>({
+	getJobs: () => [],
+	cancelJob: () => Promise.resolve({status: 'not-found'}),
+	canCancelJob: () => false,
+	isCancelling: () => false,
+	subscribeToCancellation: () => () => undefined,
+});
+
+export const renderJobsRef = createRef<{
+	updateRenderJobs: (jobs: RenderJob[]) => void;
+	updateClientRenders: (renders: CompletedClientRender[]) => void;
+}>();
+
+export const RenderQueueContextProvider: React.FC<{
+	readonly children: React.ReactNode;
+}> = ({children}) => {
+	const [serverJobs, setServerJobs] = useState<RenderJob[]>(
+		window.remotion_initialRenderQueue ?? [],
+	);
+	const [clientJobs, setClientJobs] = useState<ClientRenderJob[]>(
+		restorePersistedClientRenders,
+	);
+	const [captionJobs, setCaptionJobs] = useState<CaptionJob[]>([]);
+	const [videoMattingJobs, setVideoMattingJobs] = useState<VideoMattingJob[]>(
+		[],
+	);
+	const localJobs = [...clientJobs, ...captionJobs, ...videoMattingJobs];
+	const hasActiveLocalJob = localJobs.some((job) =>
+		isLocalJobActive(job.status),
+	);
+	const currentlyProcessing =
+		localJobs.find((job) => isLocalJobBusy(job.status))?.id ?? null;
+	const lastLocalJobStartedAt = useRef(
+		clientJobs.reduce((latest, job) => Math.max(latest, job.startedAt), 0),
+	);
+	const processJobCallbackRef = useRef<
+		((job: ClientRenderJob) => Promise<void>) | null
+	>(null);
+	const processCaptionJobCallbackRef = useRef<
+		((job: CaptionJob) => Promise<void>) | null
+	>(null);
+	const processVideoMattingJobCallbackRef = useRef<
+		((job: VideoMattingJob) => Promise<void>) | null
+	>(null);
+	const [processorCallbacksVersion, setProcessorCallbacksVersion] = useState(0);
+
+	useEffect(() => {
+		if (!hasActiveLocalJob) {
+			return;
+		}
+
+		const preventClose = (event: BeforeUnloadEvent) => {
+			event.preventDefault();
+			event.returnValue = '';
+		};
+
+		window.addEventListener('beforeunload', preventClose);
+		return () => window.removeEventListener('beforeunload', preventClose);
+	}, [hasActiveLocalJob]);
+
+	const getLocalJobStartedAt = useCallback(() => {
+		const startedAt = Math.max(Date.now(), lastLocalJobStartedAt.current + 1);
+		lastLocalJobStartedAt.current = startedAt;
+		return startedAt;
+	}, []);
+
+	// Process the next local job when state changes. Server renders have their own
+	// queue and are intentionally independent from browser-local work.
+	useEffect(() => {
+		if (currentlyProcessing) {
+			return;
+		}
+
+		const nextJob = [...clientJobs, ...captionJobs, ...videoMattingJobs]
+			.filter((job) => job.status === 'idle')
+			.sort((a, b) => a.startedAt - b.startedAt)[0];
+		if (!nextJob) {
+			return;
+		}
+
+		if (nextJob.type === 'caption') {
+			if (!processCaptionJobCallbackRef.current) {
+				return;
+			}
+
+			setCaptionJobs((prev) =>
+				transitionLocalJobs(prev, nextJob.id, 'start', (job) => ({
+					...job,
+					status: 'running',
+					progress: {
+						message: 'Starting transcription...',
+						value: 0,
+					},
+				})),
+			);
+			processCaptionJobCallbackRef.current(nextJob);
+			return;
+		}
+
+		if (nextJob.type === 'video-matting') {
+			if (!processVideoMattingJobCallbackRef.current) {
+				return;
+			}
+
+			setVideoMattingJobs((prev) =>
+				transitionLocalJobs(prev, nextJob.id, 'start', (job) => ({
+					...job,
+					status: 'running',
+					progress: {
+						detail: null,
+						message:
+							'outName' in job
+								? 'Starting background removal...'
+								: 'Starting video matting...',
+						value: 0,
+					},
+				})),
+			);
+			processVideoMattingJobCallbackRef.current(nextJob);
+			return;
+		}
+
+		if (!processJobCallbackRef.current) {
+			return;
+		}
+
+		setClientJobs((prev) =>
+			transitionLocalJobs(
+				prev,
+				nextJob.id,
+				'start',
+				(job) =>
+					({
+						...job,
+						status: 'running',
+						progress: {
+							encodedFrames: 0,
+							totalFrames: 0,
+							doneIn: null,
+							renderEstimatedTime: 0,
+							progress: 0,
+						},
+					}) as ClientRenderJob,
+			),
+		);
+		processJobCallbackRef.current(nextJob);
+	}, [
+		captionJobs,
+		clientJobs,
+		currentlyProcessing,
+		processorCallbacksVersion,
+		videoMattingJobs,
+	]);
+
+	const addClientStillJob = useCallback(
+		(
+			params: AddClientStillJobParams,
+			compositionRef: CompositionRef,
+		): string => {
+			const id = generateJobId();
+			registerCompositionForJob(id, compositionRef);
+
+			const newJob: ClientStillRenderJob = {
+				...params,
+				id,
+				startedAt: getLocalJobStartedAt(),
+				status: 'idle',
+			};
+
+			setClientJobs((prev) => [...prev, newJob]);
+			return id;
+		},
+		[getLocalJobStartedAt],
+	);
+
+	const addClientVideoJob = useCallback(
+		(
+			params: AddClientVideoJobParams,
+			compositionRef: CompositionRef,
+		): string => {
+			const id = generateJobId();
+			registerCompositionForJob(id, compositionRef);
+
+			const newJob: ClientVideoRenderJob = {
+				...params,
+				id,
+				startedAt: getLocalJobStartedAt(),
+				status: 'idle',
+			};
+
+			setClientJobs((prev) => [...prev, newJob]);
+			return id;
+		},
+		[getLocalJobStartedAt],
+	);
+
+	const updateClientJobProgress = useCallback(
+		(jobId: string, progress: ClientRenderJobProgress): void => {
+			setClientJobs((prev) =>
+				transitionLocalJobs(prev, jobId, 'progress', (job) =>
+					job.status === 'running' ? {...job, progress} : job,
+				),
+			);
+		},
+		[],
+	);
+
+	const markClientJobSaving = useCallback((jobId: string): void => {
+		setClientJobs((prev) =>
+			transitionLocalJobs(
+				prev,
+				jobId,
+				'saving',
+				(job) => ({...job, status: 'saving'}) as ClientRenderJob,
+			),
+		);
+	}, []);
+
+	const markClientJobDone = useCallback(
+		(
+			jobId: string,
+			metadata: CompletedClientRender['metadata'],
+			localOutput: LocalRenderOutput | null,
+		): void => {
+			deleteAbortController(jobId);
+			cleanupCompositionForJob(jobId);
+
+			setClientJobs((prev) =>
+				transitionLocalJobs(
+					prev,
+					jobId,
+					'done',
+					(job) =>
+						({
+							...job,
+							status: 'done',
+							metadata,
+							localOutput,
+						}) as ClientRenderJob,
+				),
+			);
+		},
+		[],
+	);
+
+	const markClientJobFailed = useCallback(
+		(jobId: string, error: Error): void => {
+			deleteAbortController(jobId);
+			cleanupCompositionForJob(jobId);
+
+			setClientJobs((prev) =>
+				transitionLocalJobs(
+					prev,
+					jobId,
+					'failed',
+					(job) =>
+						({
+							...job,
+							status: 'failed',
+							error: {message: error.message, stack: error.stack},
+						}) as ClientRenderJob,
+				),
+			);
+		},
+		[],
+	);
+
+	const markClientJobCancelled = useCallback((jobId: string): void => {
+		deleteAbortController(jobId);
+		cleanupCompositionForJob(jobId);
+
+		setClientJobs((prev) =>
+			transitionLocalJobs(
+				prev,
+				jobId,
+				'cancelled',
+				(job) => ({...job, status: 'cancelled'}) as ClientRenderJob,
+			),
+		);
+	}, []);
+
+	const removeClientJob = useCallback((jobId: string): void => {
+		setClientJobs((prev) => {
+			const jobToRemove = prev.find((j) => j.id === jobId);
+			if (jobToRemove && !canApplyLocalJobEvent(jobToRemove.status, 'remove')) {
+				return prev;
+			}
+
+			deleteAbortController(jobId);
+			cleanupCompositionForJob(jobId);
+			return prev.filter((job) => job.id !== jobId);
+		});
+	}, []);
+
+	const cancelClientJob = useCallback((jobId: string): void => {
+		cancelAbortController(jobId);
+	}, []);
+
+	const setProcessJobCallback = useCallback(
+		(callback: ((job: ClientRenderJob) => Promise<void>) | null): void => {
+			processJobCallbackRef.current = callback;
+			setProcessorCallbacksVersion((version) => version + 1);
+		},
+		[],
+	);
+
+	const addCaptionJob = useCallback(
+		(params: AddCaptionJobParams): string => {
+			const id = `caption-${Date.now()}-${Math.random()
+				.toString(36)
+				.substring(2, 11)}`;
+			const newJob: CaptionJob = {
+				...params,
+				id,
+				type: 'caption',
+				startedAt: getLocalJobStartedAt(),
+				status: 'idle',
+			};
+
+			setCaptionJobs((prev) => [...prev, newJob]);
+			return id;
+		},
+		[getLocalJobStartedAt],
+	);
+
+	const updateCaptionJobProgress = useCallback(
+		(jobId: string, progress: CaptionJobProgress): void => {
+			setCaptionJobs((prev) =>
+				transitionLocalJobs(
+					prev,
+					jobId,
+					'progress',
+					(job) => ({...job, progress}) as CaptionJob,
+				),
+			);
+		},
+		[],
+	);
+
+	const markCaptionJobDone = useCallback(
+		(jobId: string, captionCount: number): void => {
+			deleteAbortController(jobId);
+			setCaptionJobs((prev) =>
+				transitionLocalJobs(
+					prev,
+					jobId,
+					'done',
+					(job) => ({...job, status: 'done', captionCount}) as CaptionJob,
+				),
+			);
+		},
+		[],
+	);
+
+	const markCaptionJobFailed = useCallback(
+		(jobId: string, error: Error): void => {
+			deleteAbortController(jobId);
+			setCaptionJobs((prev) =>
+				transitionLocalJobs(
+					prev,
+					jobId,
+					'failed',
+					(job) =>
+						({
+							...job,
+							status: 'failed',
+							error: {message: error.message, stack: error.stack},
+						}) as CaptionJob,
+				),
+			);
+		},
+		[],
+	);
+
+	const markCaptionJobCancelled = useCallback((jobId: string): void => {
+		deleteAbortController(jobId);
+		setCaptionJobs((prev) =>
+			transitionLocalJobs(prev, jobId, 'cancelled', (job) => ({
+				...job,
+				status: 'cancelled',
+			})),
+		);
+	}, []);
+
+	const markCaptionJobSaving = useCallback((jobId: string): void => {
+		setCaptionJobs((prev) =>
+			transitionLocalJobs(
+				prev,
+				jobId,
+				'saving',
+				(job) => ({...job, status: 'saving'}) as CaptionJob,
+			),
+		);
+	}, []);
+
+	const removeCaptionJob = useCallback((jobId: string): void => {
+		setCaptionJobs((prev) => {
+			const jobToRemove = prev.find((job) => job.id === jobId);
+			if (jobToRemove && !canApplyLocalJobEvent(jobToRemove.status, 'remove')) {
+				return prev;
+			}
+
+			deleteAbortController(jobId);
+			return prev.filter((job) => job.id !== jobId);
+		});
+	}, []);
+
+	const setProcessCaptionJobCallback = useCallback(
+		(callback: ((job: CaptionJob) => Promise<void>) | null): void => {
+			processCaptionJobCallbackRef.current = callback;
+			setProcessorCallbacksVersion((version) => version + 1);
+		},
+		[],
+	);
+
+	const addVideoMattingJob = useCallback(
+		(params: AddVideoMattingJobParams): string => {
+			const id = `video-matting-${Date.now()}-${Math.random()
+				.toString(36)
+				.substring(2, 11)}`;
+			setVideoMattingJobs((prev) => [
+				...prev,
+				{
+					...params,
+					id,
+					type: 'video-matting',
+					startedAt: getLocalJobStartedAt(),
+					status: 'idle',
+				},
+			]);
+			return id;
+		},
+		[getLocalJobStartedAt],
+	);
+
+	const updateVideoMattingJobProgress = useCallback(
+		(jobId: string, progress: VideoMattingJobProgress): void => {
+			setVideoMattingJobs((prev) =>
+				transitionLocalJobs(
+					prev,
+					jobId,
+					'progress',
+					(job) => ({...job, progress}) as VideoMattingJob,
+				),
+			);
+		},
+		[],
+	);
+
+	const markVideoMattingJobDone = useCallback((jobId: string): void => {
+		deleteAbortController(jobId);
+		setVideoMattingJobs((prev) =>
+			transitionLocalJobs(prev, jobId, 'done', (job) => ({
+				...job,
+				status: 'done',
+			})),
+		);
+	}, []);
+
+	const markVideoMattingJobFailed = useCallback(
+		(jobId: string, error: Error): void => {
+			deleteAbortController(jobId);
+			setVideoMattingJobs((prev) =>
+				transitionLocalJobs(prev, jobId, 'failed', (job) => ({
+					...job,
+					status: 'failed',
+					error: {message: error.message, stack: error.stack},
+				})),
+			);
+		},
+		[],
+	);
+
+	const markVideoMattingJobCancelled = useCallback((jobId: string): void => {
+		deleteAbortController(jobId);
+		setVideoMattingJobs((prev) =>
+			transitionLocalJobs(prev, jobId, 'cancelled', (job) => ({
+				...job,
+				status: 'cancelled',
+			})),
+		);
+	}, []);
+
+	const markVideoMattingJobSaving = useCallback((jobId: string): void => {
+		setVideoMattingJobs((prev) =>
+			transitionLocalJobs(
+				prev,
+				jobId,
+				'saving',
+				(job) => ({...job, status: 'saving'}) as VideoMattingJob,
+			),
+		);
+	}, []);
+
+	const removeVideoMattingJob = useCallback((jobId: string): void => {
+		setVideoMattingJobs((prev) => {
+			const jobToRemove = prev.find((job) => job.id === jobId);
+			if (jobToRemove && !canApplyLocalJobEvent(jobToRemove.status, 'remove')) {
+				return prev;
+			}
+
+			deleteAbortController(jobId);
+			return prev.filter((job) => job.id !== jobId);
+		});
+	}, []);
+
+	const setProcessVideoMattingJobCallback = useCallback(
+		(callback: ((job: VideoMattingJob) => Promise<void>) | null): void => {
+			processVideoMattingJobCallbackRef.current = callback;
+			setProcessorCallbacksVersion((version) => version + 1);
+		},
+		[],
+	);
+
+	const {previewServerState} = useContext(StudioServerConnectionCtx);
+	const connectionRef = useRef(previewServerState);
+	connectionRef.current = previewServerState;
+	const jobsSnapshot = useRef<{
+		serverJobs: RenderJob[];
+		clientJobs: ClientRenderJob[];
+		jobs: AnyRenderJob[];
+	} | null>(null);
+	const readJobs = useCallback(
+		(server: RenderJob[], client: ClientRenderJob[]) => {
+			const snapshot = jobsSnapshot.current;
+			if (snapshot?.serverJobs === server && snapshot.clientJobs === client)
+				return snapshot.jobs;
+			const mergedJobs = [...server, ...client].sort(
+				(a, b) => a.startedAt - b.startedAt,
+			);
+			jobsSnapshot.current = {
+				serverJobs: server,
+				clientJobs: client,
+				jobs: mergedJobs,
+			};
+			return mergedJobs;
+		},
+		[],
+	);
+	const jobs = readJobs(serverJobs, clientJobs);
+	const cancellation = useMemo(
+		() =>
+			createRenderCancellationStore({
+				getJobs: () => jobsSnapshot.current?.jobs ?? [],
+				cancelClientJob: (jobId) => {
+					const job = jobsSnapshot.current?.jobs.find(
+						(item) => item.id === jobId,
+					);
+					cancelClientJob(jobId);
+					if (job?.status === 'idle') markClientJobCancelled(jobId);
+				},
+				canCancelServerJobs: () =>
+					connectionRef.current.type === 'connected' &&
+					!window.remotion_isReadOnlyStudio &&
+					getBrowserStudioOperations() === null,
+			}),
+		[cancelClientJob, markClientJobCancelled],
+	);
+	useLayoutEffect(() => {
+		cancellation.reconcile();
+	}, [cancellation, jobs]);
+	useEffect(() => () => cancellation.clear(), [cancellation]);
+
+	useImperativeHandle(
+		renderJobsRef,
+		() => ({
+			updateRenderJobs: (newJobs) => {
+				readJobs(newJobs, jobsSnapshot.current?.clientJobs ?? []);
+				cancellation.reconcile();
+				setServerJobs(newJobs);
+			},
+			updateClientRenders: (renders: CompletedClientRender[]) => {
+				setClientJobs((prev) => {
+					const existingIds = new Set(prev.map((j) => j.id));
+					const updatedPrev = prev.map((job) => {
+						const updated = renders.find((r) => r.id === job.id);
+						if (updated && job.status === 'done') {
+							return {
+								...job,
+								deletedOutputLocation: updated.deletedOutputLocation,
+								metadata: updated.metadata,
+							} as ClientRenderJob;
+						}
+
+						return job;
+					});
+
+					const newJobs = renders
+						.filter((r) => !existingIds.has(r.id))
+						.map(
+							(r): RestoredClientRenderJob => ({
+								...r,
+								status: 'done',
+								localOutput: null,
+							}),
+						);
+
+					return [...updatedPrev, ...newJobs];
+				});
+			},
+		}),
+		[cancellation, readJobs],
+	);
+
+	const value: RenderQueueContextType = useMemo(() => {
+		return {
+			jobs,
+			serverJobs,
+			clientJobs,
+			captionJobs,
+			videoMattingJobs,
+			addClientStillJob,
+			addClientVideoJob,
+			updateClientJobProgress,
+			markClientJobSaving,
+			markClientJobDone,
+			markClientJobFailed,
+			markClientJobCancelled,
+			removeClientJob,
+			cancelClientJob,
+			setProcessJobCallback,
+			addCaptionJob,
+			updateCaptionJobProgress,
+			markCaptionJobDone,
+			markCaptionJobFailed,
+			markCaptionJobCancelled,
+			markCaptionJobSaving,
+			removeCaptionJob,
+			setProcessCaptionJobCallback,
+			addVideoMattingJob,
+			updateVideoMattingJobProgress,
+			markVideoMattingJobDone,
+			markVideoMattingJobFailed,
+			markVideoMattingJobCancelled,
+			markVideoMattingJobSaving,
+			removeVideoMattingJob,
+			setProcessVideoMattingJobCallback,
+			getAbortController,
+			getCompositionForJob,
+		};
+	}, [
+		jobs,
+		serverJobs,
+		clientJobs,
+		captionJobs,
+		videoMattingJobs,
+		addClientStillJob,
+		addClientVideoJob,
+		updateClientJobProgress,
+		markClientJobSaving,
+		markClientJobDone,
+		markClientJobFailed,
+		markClientJobCancelled,
+		removeClientJob,
+		cancelClientJob,
+		setProcessJobCallback,
+		addCaptionJob,
+		updateCaptionJobProgress,
+		markCaptionJobDone,
+		markCaptionJobFailed,
+		markCaptionJobCancelled,
+		markCaptionJobSaving,
+		removeCaptionJob,
+		setProcessCaptionJobCallback,
+		addVideoMattingJob,
+		updateVideoMattingJobProgress,
+		markVideoMattingJobDone,
+		markVideoMattingJobFailed,
+		markVideoMattingJobCancelled,
+		markVideoMattingJobSaving,
+		removeVideoMattingJob,
+		setProcessVideoMattingJobCallback,
+	]);
+
+	return (
+		<RenderQueueActionsContext.Provider value={cancellation}>
+			<RenderQueueContext.Provider value={value}>
+				{children}
+			</RenderQueueContext.Provider>
+		</RenderQueueActionsContext.Provider>
+	);
+};

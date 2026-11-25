@@ -1,0 +1,375 @@
+/**
+ * Copyright 2017 Google Inc. All rights reserved.
+ *
+ * Licensed under the Apache License, Version 2.0 (the "License");
+ * you may not use this file except in compliance with the License.
+ * You may obtain a copy of the License at
+ *
+ *     http://www.apache.org/licenses/LICENSE-2.0
+ *
+ * Unless required by applicable law or agreed to in writing, software
+ * distributed under the License is distributed on an "AS IS" BASIS,
+ * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+ * See the License for the specific language governing permissions and
+ * limitations under the License.
+ */
+
+import * as fs from 'node:fs';
+import * as os from 'node:os';
+import * as path from 'node:path';
+import {promisify} from 'node:util';
+import {downloadFile} from '../assets/download-file';
+import {makeFileExecutableIfItIsNot} from '../compositor/make-file-executable';
+import type {LogLevel} from '../log-level';
+import {ChromeMode} from '../options/chrome-mode';
+import type {DownloadBrowserProgressFn} from '../options/on-browser-download';
+import {acquireBrowserDownloadLock} from './browser-download-lock';
+import {extractZipArchive} from './extract-zip-archive';
+import {
+	getChromeDownloadUrl,
+	logDownloadUrl,
+	type Platform,
+	TESTED_VERSION,
+} from './get-chrome-download-url';
+import {getDownloadsCacheDir} from './get-download-destination';
+
+export {TESTED_VERSION};
+
+const mkdirAsync = fs.promises.mkdir;
+const unlinkAsync = promisify(fs.unlink.bind(fs));
+
+function existsAsync(filePath: string): Promise<boolean> {
+	return new Promise((resolve) => {
+		fs.access(filePath, (err) => {
+			return resolve(!err);
+		});
+	});
+}
+
+interface BrowserFetcherRevisionInfo {
+	folderPath: string;
+	executablePath: string;
+	url: string;
+	local: boolean;
+}
+
+export const getPlatform = (): Platform => {
+	const platform = os.platform();
+	switch (platform) {
+		case 'darwin':
+			return os.arch() === 'arm64' ? 'mac-arm64' : 'mac-x64';
+		case 'linux':
+			return os.arch() === 'arm64' ? 'linux-arm64' : 'linux64';
+		case 'win32':
+			return 'win64';
+		default:
+			throw new Error('Unsupported platform: ' + platform);
+	}
+};
+
+const getChromeModeFolder = (chromeMode: ChromeMode) => {
+	const destination =
+		chromeMode === 'headless-shell'
+			? 'chrome-headless-shell'
+			: 'chrome-for-testing';
+
+	return path.join(getDownloadsCacheDir(), destination);
+};
+
+const getVersionFolder = (
+	chromeMode: ChromeMode,
+	expectedVersion: string,
+): string => {
+	if (
+		expectedVersion === '.' ||
+		expectedVersion === '..' ||
+		/[/\\]/.test(expectedVersion)
+	) {
+		throw new Error(
+			`Invalid Chrome version "${expectedVersion}" returned from onBrowserDownload().`,
+		);
+	}
+
+	return path.join(getChromeModeFolder(chromeMode), expectedVersion);
+};
+
+export const getExpectedVersion = ({
+	version,
+	chromeMode,
+	platform,
+}: {
+	version: string | null;
+	chromeMode: ChromeMode;
+	platform: Platform;
+}): string => {
+	if (version) {
+		return version;
+	}
+
+	// Remotion-patched builds get their own cache marker so an existing stock or
+	// older patched download of the same Chromium version is replaced once.
+	// Remotion builds include the v3 shared-memory patch; Google's CDN builds
+	// are stock Chromium.
+	const downloadUrl = getChromeDownloadUrl({
+		platform,
+		version: null,
+		chromeMode,
+	});
+	if (
+		chromeMode === 'headless-shell' &&
+		downloadUrl.startsWith('https://remotion.media/')
+	) {
+		return `${TESTED_VERSION}-remotion-v3`;
+	}
+
+	return TESTED_VERSION;
+};
+
+const adoptLegacyInstall = (
+	chromeMode: ChromeMode,
+	expectedVersion: string,
+): void => {
+	const chromeModeFolder = getChromeModeFolder(chromeMode);
+	const legacyVersionFile = path.join(chromeModeFolder, 'VERSION');
+	let legacyVersion: string;
+	try {
+		legacyVersion = fs.readFileSync(legacyVersionFile, 'utf-8').trim();
+	} catch {
+		return;
+	}
+
+	if (legacyVersion !== expectedVersion) {
+		return;
+	}
+
+	const platform = getPlatform();
+	const legacyFolder = getFolderPath(chromeModeFolder, platform);
+	const versionFolder = getVersionFolder(chromeMode, expectedVersion);
+	const targetFolder = getFolderPath(versionFolder, platform);
+	if (!fs.existsSync(legacyFolder) || fs.existsSync(targetFolder)) {
+		return;
+	}
+
+	try {
+		fs.mkdirSync(versionFolder, {recursive: true});
+		fs.renameSync(legacyFolder, targetFolder);
+		fs.renameSync(legacyVersionFile, path.join(versionFolder, 'VERSION'));
+	} catch {}
+};
+
+export const downloadBrowser = async ({
+	logLevel,
+	indent,
+	onProgress,
+	version,
+	chromeMode,
+}: {
+	logLevel: LogLevel;
+	indent: boolean;
+	onProgress: DownloadBrowserProgressFn;
+	version: string | null;
+	chromeMode: ChromeMode;
+}): Promise<BrowserFetcherRevisionInfo | undefined> => {
+	const platform = getPlatform();
+	const downloadURL = getChromeDownloadUrl({platform, version, chromeMode});
+	// remotion.media URLs carry a ?clear query string, and "?" is not a valid
+	// file name character on Windows.
+	const fileName = downloadURL.split('/').pop()?.split('?')[0];
+	if (!fileName) {
+		throw new Error(`A malformed download URL was found: ${downloadURL}.`);
+	}
+
+	const expectedVersion = getExpectedVersion({version, chromeMode, platform});
+	const downloadsFolder = getVersionFolder(chromeMode, expectedVersion);
+	const archivePath = path.join(downloadsFolder, fileName);
+	const outputPath = getFolderPath(downloadsFolder, platform);
+	const versionFilePath = path.join(downloadsFolder, 'VERSION');
+
+	const existing = getRevisionInfo({chromeMode, version});
+	if (existing.local) {
+		return existing;
+	}
+
+	if (!(await existsAsync(downloadsFolder))) {
+		await mkdirAsync(downloadsFolder, {
+			recursive: true,
+		});
+	}
+
+	if (
+		os.platform() !== 'darwin' &&
+		os.platform() !== 'linux' &&
+		os.arch() === 'arm64'
+	) {
+		throw new Error(
+			[
+				'Chrome Headless Shell is not available for Windows for arm64 architecture.',
+			].join('\n'),
+		);
+	}
+
+	const releaseLock = await acquireBrowserDownloadLock(
+		path.join(downloadsFolder, 'download.lock'),
+	);
+
+	try {
+		adoptLegacyInstall(chromeMode, expectedVersion);
+
+		const installedMeanwhile = getRevisionInfo({chromeMode, version});
+		if (installedMeanwhile.local) {
+			return installedMeanwhile;
+		}
+
+		fs.rmSync(versionFilePath, {force: true});
+		fs.rmSync(outputPath, {recursive: true, force: true});
+
+		logDownloadUrl({url: downloadURL, logLevel, indent});
+
+		try {
+			await downloadFile({
+				url: downloadURL,
+				to: () => archivePath,
+				onProgress: (progress) => {
+					if (progress.totalSize === null || progress.percent === null) {
+						throw new Error('Expected totalSize and percent to be defined');
+					}
+
+					onProgress({
+						downloadedBytes: progress.downloaded,
+						totalSizeInBytes: progress.totalSize,
+						percent: progress.percent,
+						alreadyAvailable: false,
+					});
+				},
+				indent,
+				logLevel,
+				abortSignal: new AbortController().signal,
+			}).catch((err) => {
+				throw new Error(
+					`Could not download ${chromeMode === 'headless-shell' ? 'Chrome Headless Shell' : 'Chrome for Testing'} from ${downloadURL}: ${err instanceof Error ? err.message : String(err)}\nIf your network restricts outgoing traffic, allow the download hosts. If the machine has no internet access at render time, install the browser while building it (e.g. "npx remotion browser ensure" in your Dockerfile), or pass "browserExecutable". See https://www.remotion.dev/docs/miscellaneous/chrome-headless-shell#download-hosts`,
+					{cause: err},
+				);
+			});
+			await extractZipArchive(archivePath, outputPath);
+
+			const possibleSubdirs = [
+				'chrome-linux',
+				'chrome-headless-shell-linux64',
+				'chromium-headless-shell-amazon-linux2023-arm64',
+				'chromium-headless-shell-amazon-linux2023-x64',
+			];
+
+			for (const subdir of possibleSubdirs) {
+				const chromeLinuxFolder = path.join(outputPath, subdir);
+				const chromePath = path.join(chromeLinuxFolder, 'chrome');
+
+				if (chromeMode === 'headless-shell' && fs.existsSync(chromePath)) {
+					const chromeHeadlessShellPath = path.join(
+						chromeLinuxFolder,
+						'chrome-headless-shell',
+					);
+
+					fs.renameSync(chromePath, chromeHeadlessShellPath);
+				}
+
+				if (fs.existsSync(chromeLinuxFolder)) {
+					const targetFolder = path.join(
+						outputPath,
+						(chromeMode === 'headless-shell'
+							? 'chrome-headless-shell-'
+							: 'chrome-') + platform,
+					);
+
+					if (chromeLinuxFolder !== targetFolder) {
+						fs.renameSync(chromeLinuxFolder, targetFolder);
+					}
+				}
+			}
+		} catch (err) {
+			return Promise.reject(err);
+		} finally {
+			if (await existsAsync(archivePath)) {
+				await unlinkAsync(archivePath);
+			}
+		}
+
+		const {executablePath} = getRevisionInfo({chromeMode, version});
+		makeFileExecutableIfItIsNot(executablePath);
+		fs.writeFileSync(versionFilePath, expectedVersion);
+
+		return getRevisionInfo({chromeMode, version});
+	} finally {
+		await releaseLock();
+	}
+};
+
+const getFolderPath = (downloadsFolder: string, platform: Platform): string => {
+	return path.resolve(downloadsFolder, platform);
+};
+
+const getExecutablePath = (chromeMode: ChromeMode, folderPath: string) => {
+	const platform = getPlatform();
+
+	if (chromeMode === 'chrome-for-testing') {
+		if (platform === 'mac-arm64' || platform === 'mac-x64') {
+			return path.join(
+				folderPath,
+				`chrome-${platform}`,
+				'Google Chrome for Testing.app/Contents/MacOS/Google Chrome for Testing',
+			);
+		}
+		if (platform === 'win64') {
+			return path.join(folderPath, 'chrome-win64', 'chrome.exe');
+		}
+		if (platform === 'linux64' || platform === 'linux-arm64') {
+			return path.join(folderPath, `chrome-${platform}`, 'chrome');
+		}
+
+		throw new Error('unsupported platform' + (platform satisfies never));
+	}
+	if (chromeMode === 'headless-shell') {
+		const shellFolder = path.join(
+			folderPath,
+			`chrome-headless-shell-${platform}`,
+		);
+		const remotionExecutable = path.join(shellFolder, 'headless_shell');
+		if (fs.existsSync(remotionExecutable)) {
+			return remotionExecutable;
+		}
+
+		return path.join(
+			shellFolder,
+			platform === 'win64'
+				? 'chrome-headless-shell.exe'
+				: 'chrome-headless-shell',
+		);
+	}
+
+	throw new Error('unsupported chrome mode' + (chromeMode satisfies never));
+};
+
+export const getRevisionInfo = ({
+	chromeMode,
+	version,
+}: {
+	chromeMode: ChromeMode;
+	version: string | null;
+}): BrowserFetcherRevisionInfo => {
+	const platform = getPlatform();
+	const expectedVersion = getExpectedVersion({version, chromeMode, platform});
+	const versionFolder = getVersionFolder(chromeMode, expectedVersion);
+	const folderPath = getFolderPath(versionFolder, platform);
+	const executablePath = getExecutablePath(chromeMode, folderPath);
+
+	const url = getChromeDownloadUrl({platform, version, chromeMode});
+	const local =
+		fs.existsSync(path.join(versionFolder, 'VERSION')) &&
+		fs.existsSync(executablePath);
+
+	return {
+		executablePath,
+		folderPath,
+		local,
+		url,
+	};
+};

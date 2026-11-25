@@ -1,0 +1,378 @@
+import type {
+	AudioCodec,
+	StillImageFormat,
+	VideoImageFormat,
+} from '@remotion/renderer';
+import type {TypeOfOption} from '@remotion/renderer/client';
+import {BrowserSafeApis} from '@remotion/renderer/client';
+import minimist from 'minimist';
+
+const {
+	chromiumFlagsOption,
+	chromiumFeaturesOption,
+	chromiumBlinkFeaturesOption,
+	allowHtmlInCanvasOption,
+	preferredEffectBackendOption,
+	benchmarkConcurrenciesOption,
+	beepOnFinishOption,
+	colorSpaceOption,
+	concurrencyOption,
+	disallowParallelEncodingOption,
+	disableSharedMemoryCaptureOption,
+	offthreadVideoCacheSizeInBytesOption,
+	encodingBufferSizeOption,
+	encodingMaxRateOption,
+	deleteAfterOption,
+	folderExpiryOption,
+	enableCancellationOption,
+	enableMultiprocessOnLinuxOption,
+	numberOfGifLoopsOption,
+	x264Option,
+	enforceAudioOption,
+	jpegQualityOption,
+	audioBitrateOption,
+	videoBitrateOption,
+	audioCodecOption,
+	publicPathOption,
+	audioLatencyHintOption,
+	darkModeOption,
+	defaultCodingAgentOption,
+	doubleClickActionOption,
+	defaultEditorOption,
+	defaultPremountInSecondsOption,
+	showDiagnosticsOption,
+	showLayerFrameNumbersOption,
+	preservePitchOnPlaybackOption,
+	highContrastOption,
+	showPremountingOption,
+	publicLicenseKeyOption,
+	licenseKeyOption,
+	forceNewStudioOption,
+	experimentalKeepAudioContextAliveOption,
+	sequenceActivityLimitOption,
+	numberOfSharedAudioTagsOption,
+	ipv4Option,
+	pixelFormatOption,
+	browserExecutableOption,
+	everyNthFrameOption,
+	proResBitsPerMacroblockOption,
+	proResProfileOption,
+	userAgentOption,
+	disableWebSecurityOption,
+	ignoreCertificateErrorsOption,
+	overrideHeightOption,
+	overrideWidthOption,
+	overrideFpsOption,
+	overrideDurationOption,
+	outDirOption,
+	openTimelineMediaDirectoryOption,
+	packageManagerOption,
+	webpackPollOption,
+	keyboardShortcutsOption,
+	canvasTabsOption,
+	interactivityOption,
+	imageSequencePatternOption,
+	scaleOption,
+	overwriteOption,
+	crfOption,
+	logLevelOption,
+	videoCodecOption,
+	stillFrameOption,
+	imageSequenceOption,
+	versionFlagOption,
+	bundleCacheOption,
+	envFileOption,
+	glOption,
+	gopSizeOption,
+	runsOption,
+	reproOption,
+	mutedOption,
+	headlessOption,
+	disableGitSourceOption,
+	delayRenderTimeoutInMillisecondsOption,
+	framesOption,
+	forSeamlessAacConcatenationOption,
+	isProductionOption,
+	noOpenOption,
+	portOption,
+	propsOption,
+	configOption,
+	browserOption,
+	sampleRateOption,
+	previewSampleRateOption,
+	rspackOption,
+	skipSkillsOption,
+	throwIfSiteExistsOption,
+	enableCrossSiteIsolationOption,
+	preferLosslessOption,
+	enableLambdaInsights,
+	askAIOption,
+}: typeof BrowserSafeApis.options = BrowserSafeApis.options;
+
+export type CommandLineOptions = {
+	[chromiumFlagsOption.cliFlag]: string;
+	[chromiumFeaturesOption.cliFlag]: string;
+	[chromiumBlinkFeaturesOption.cliFlag]: string;
+	[openTimelineMediaDirectoryOption.cliFlag]: TypeOfOption<
+		typeof openTimelineMediaDirectoryOption
+	>;
+	[allowHtmlInCanvasOption.cliFlag]: TypeOfOption<
+		typeof allowHtmlInCanvasOption
+	> | null;
+	[browserExecutableOption.cliFlag]: TypeOfOption<
+		typeof browserExecutableOption
+	>;
+	[pixelFormatOption.cliFlag]: TypeOfOption<typeof pixelFormatOption>;
+	['image-format']: VideoImageFormat | StillImageFormat;
+	[proResBitsPerMacroblockOption.cliFlag]: TypeOfOption<
+		typeof proResBitsPerMacroblockOption
+	>;
+	[proResProfileOption.cliFlag]: TypeOfOption<typeof proResProfileOption>;
+	[x264Option.cliFlag]: TypeOfOption<typeof x264Option>;
+	[bundleCacheOption.cliFlag]: TypeOfOption<typeof bundleCacheOption> | null;
+	[envFileOption.cliFlag]: TypeOfOption<typeof envFileOption>;
+	[ignoreCertificateErrorsOption.cliFlag]: TypeOfOption<
+		typeof ignoreCertificateErrorsOption
+	> | null;
+	[darkModeOption.cliFlag]: TypeOfOption<typeof darkModeOption> | null;
+	[defaultCodingAgentOption.cliFlag]: TypeOfOption<
+		typeof defaultCodingAgentOption
+	>;
+	[defaultEditorOption.cliFlag]: TypeOfOption<typeof defaultEditorOption>;
+	[doubleClickActionOption.cliFlag]: TypeOfOption<
+		typeof doubleClickActionOption
+	>;
+	[defaultPremountInSecondsOption.cliFlag]: TypeOfOption<
+		typeof defaultPremountInSecondsOption
+	>;
+	[preservePitchOnPlaybackOption.cliFlag]: TypeOfOption<
+		typeof preservePitchOnPlaybackOption
+	> | null;
+	[showDiagnosticsOption.cliFlag]: TypeOfOption<
+		typeof showDiagnosticsOption
+	> | null;
+	[showLayerFrameNumbersOption.cliFlag]: TypeOfOption<
+		typeof showLayerFrameNumbersOption
+	> | null;
+	[highContrastOption.cliFlag]: TypeOfOption<typeof highContrastOption> | null;
+	[showPremountingOption.cliFlag]: TypeOfOption<
+		typeof showPremountingOption
+	> | null;
+	[disableWebSecurityOption.cliFlag]: TypeOfOption<
+		typeof disableWebSecurityOption
+	> | null;
+	[everyNthFrameOption.cliFlag]: TypeOfOption<typeof everyNthFrameOption>;
+	[numberOfGifLoopsOption.cliFlag]: TypeOfOption<typeof numberOfGifLoopsOption>;
+	[numberOfSharedAudioTagsOption.cliFlag]: TypeOfOption<
+		typeof numberOfSharedAudioTagsOption
+	>;
+	[experimentalKeepAudioContextAliveOption.cliFlag]: TypeOfOption<
+		typeof experimentalKeepAudioContextAliveOption
+	> | null;
+	[sequenceActivityLimitOption.cliFlag]: TypeOfOption<
+		typeof sequenceActivityLimitOption
+	>;
+	[offthreadVideoCacheSizeInBytesOption.cliFlag]: TypeOfOption<
+		typeof offthreadVideoCacheSizeInBytesOption
+	>;
+	[colorSpaceOption.cliFlag]: TypeOfOption<typeof colorSpaceOption>;
+	[disableSharedMemoryCaptureOption.cliFlag]: TypeOfOption<
+		typeof disableSharedMemoryCaptureOption
+	> | null;
+	[disallowParallelEncodingOption.cliFlag]: TypeOfOption<
+		typeof disallowParallelEncodingOption
+	> | null;
+	[beepOnFinishOption.cliFlag]: TypeOfOption<typeof beepOnFinishOption> | null;
+	[versionFlagOption.cliFlag]: TypeOfOption<typeof versionFlagOption>;
+	[videoCodecOption.cliFlag]: TypeOfOption<typeof videoCodecOption>;
+	[concurrencyOption.cliFlag]: TypeOfOption<typeof concurrencyOption>;
+	[delayRenderTimeoutInMillisecondsOption.cliFlag]: TypeOfOption<
+		typeof delayRenderTimeoutInMillisecondsOption
+	>;
+	[configOption.cliFlag]: TypeOfOption<typeof configOption>;
+	['public-dir']: string;
+	[audioBitrateOption.cliFlag]: TypeOfOption<typeof audioBitrateOption>;
+	[videoBitrateOption.cliFlag]: TypeOfOption<typeof videoBitrateOption>;
+	[encodingBufferSizeOption.cliFlag]: TypeOfOption<
+		typeof encodingBufferSizeOption
+	>;
+	[encodingMaxRateOption.cliFlag]: TypeOfOption<typeof encodingMaxRateOption>;
+	[audioCodecOption.cliFlag]: AudioCodec;
+	[publicPathOption.cliFlag]: string;
+	[crfOption.cliFlag]: TypeOfOption<typeof crfOption>;
+	[gopSizeOption.cliFlag]: TypeOfOption<typeof gopSizeOption>;
+	output: string | undefined;
+	[overwriteOption.cliFlag]: TypeOfOption<typeof overwriteOption> | null;
+	png: boolean;
+	[propsOption.cliFlag]: TypeOfOption<typeof propsOption>;
+	quality: number;
+	[jpegQualityOption.cliFlag]: TypeOfOption<typeof jpegQualityOption>;
+	[framesOption.cliFlag]: string | number;
+	[scaleOption.cliFlag]: TypeOfOption<typeof scaleOption>;
+	[imageSequenceOption.cliFlag]: TypeOfOption<
+		typeof imageSequenceOption
+	> | null;
+	quiet: boolean;
+	q: boolean;
+	[logLevelOption.cliFlag]: TypeOfOption<typeof logLevelOption>;
+	help: boolean;
+	[portOption.cliFlag]: TypeOfOption<typeof portOption>;
+	[stillFrameOption.cliFlag]: TypeOfOption<typeof stillFrameOption>;
+	[headlessOption.cliFlag]: TypeOfOption<typeof headlessOption> | null;
+	[keyboardShortcutsOption.cliFlag]: TypeOfOption<
+		typeof keyboardShortcutsOption
+	> | null;
+	[canvasTabsOption.cliFlag]: TypeOfOption<typeof canvasTabsOption> | null;
+	[interactivityOption.cliFlag]: TypeOfOption<
+		typeof interactivityOption
+	> | null;
+	[mutedOption.cliFlag]: TypeOfOption<typeof mutedOption> | null;
+	[overrideHeightOption.cliFlag]: TypeOfOption<typeof overrideHeightOption>;
+	[overrideWidthOption.cliFlag]: TypeOfOption<typeof overrideWidthOption>;
+	[overrideFpsOption.cliFlag]: TypeOfOption<typeof overrideFpsOption>;
+	[overrideDurationOption.cliFlag]: TypeOfOption<typeof overrideDurationOption>;
+	[runsOption.cliFlag]: TypeOfOption<typeof runsOption>;
+	[benchmarkConcurrenciesOption.cliFlag]: TypeOfOption<
+		typeof benchmarkConcurrenciesOption
+	>;
+	[enforceAudioOption.cliFlag]: TypeOfOption<typeof enforceAudioOption>;
+	[glOption.cliFlag]: TypeOfOption<typeof glOption>;
+	[packageManagerOption.cliFlag]: TypeOfOption<typeof packageManagerOption>;
+	[webpackPollOption.cliFlag]: TypeOfOption<typeof webpackPollOption>;
+	[noOpenOption.cliFlag]: TypeOfOption<typeof noOpenOption>;
+	[browserOption.cliFlag]: TypeOfOption<typeof browserOption>;
+	['browser-args']: string;
+	[userAgentOption.cliFlag]: TypeOfOption<typeof userAgentOption>;
+	[outDirOption.cliFlag]: TypeOfOption<typeof outDirOption>;
+	[audioLatencyHintOption.cliFlag]: AudioContextLatencyCategory;
+	[ipv4Option.cliFlag]: TypeOfOption<typeof ipv4Option> | null;
+	[deleteAfterOption.cliFlag]: TypeOfOption<typeof deleteAfterOption>;
+	[folderExpiryOption.cliFlag]: TypeOfOption<typeof folderExpiryOption>;
+	[enableCancellationOption.cliFlag]: TypeOfOption<
+		typeof enableCancellationOption
+	> | null;
+	[enableMultiprocessOnLinuxOption.cliFlag]: TypeOfOption<
+		typeof enableMultiprocessOnLinuxOption
+	> | null;
+	[reproOption.cliFlag]: TypeOfOption<typeof reproOption> | null;
+	[imageSequencePatternOption.cliFlag]: TypeOfOption<
+		typeof imageSequencePatternOption
+	>;
+	[licenseKeyOption.cliFlag]: TypeOfOption<typeof licenseKeyOption>;
+	[publicLicenseKeyOption.cliFlag]: string;
+	[forceNewStudioOption.cliFlag]: TypeOfOption<
+		typeof forceNewStudioOption
+	> | null;
+	[sampleRateOption.cliFlag]: TypeOfOption<typeof sampleRateOption>;
+	[preferredEffectBackendOption.cliFlag]: TypeOfOption<
+		typeof preferredEffectBackendOption
+	>;
+	[previewSampleRateOption.cliFlag]: TypeOfOption<
+		typeof previewSampleRateOption
+	>;
+	[rspackOption.cliFlag]: TypeOfOption<typeof rspackOption> | null;
+	'experimental-rspack'?: unknown;
+	[isProductionOption.cliFlag]: TypeOfOption<typeof isProductionOption> | null;
+	[skipSkillsOption.cliFlag]: TypeOfOption<typeof skipSkillsOption>;
+	[disableGitSourceOption.cliFlag]: TypeOfOption<typeof disableGitSourceOption>;
+	[forSeamlessAacConcatenationOption.cliFlag]: TypeOfOption<
+		typeof forSeamlessAacConcatenationOption
+	>;
+	[throwIfSiteExistsOption.cliFlag]: TypeOfOption<
+		typeof throwIfSiteExistsOption
+	>;
+	[enableCrossSiteIsolationOption.cliFlag]: TypeOfOption<
+		typeof enableCrossSiteIsolationOption
+	> | null;
+	[preferLosslessOption.cliFlag]: TypeOfOption<typeof preferLosslessOption>;
+	[enableLambdaInsights.cliFlag]: TypeOfOption<
+		typeof enableLambdaInsights
+	> | null;
+	[askAIOption.cliFlag]: TypeOfOption<typeof askAIOption> | null;
+};
+
+export const BooleanFlags = [
+	preservePitchOnPlaybackOption.cliFlag,
+	showDiagnosticsOption.cliFlag,
+	showLayerFrameNumbersOption.cliFlag,
+	highContrastOption.cliFlag,
+	showPremountingOption.cliFlag,
+	allowHtmlInCanvasOption.cliFlag,
+	overwriteOption.cliFlag,
+	imageSequenceOption.cliFlag,
+	'help',
+	'quiet',
+	'q',
+	mutedOption.cliFlag,
+	enforceAudioOption.cliFlag,
+	disableWebSecurityOption.cliFlag,
+	darkModeOption.cliFlag,
+	ignoreCertificateErrorsOption.cliFlag,
+	headlessOption.cliFlag,
+	keyboardShortcutsOption.cliFlag,
+	canvasTabsOption.cliFlag,
+	interactivityOption.cliFlag,
+	ipv4Option.cliFlag,
+	beepOnFinishOption.cliFlag,
+	disableGitSourceOption.cliFlag,
+	disallowParallelEncodingOption.cliFlag,
+	disableSharedMemoryCaptureOption.cliFlag,
+	forSeamlessAacConcatenationOption.cliFlag,
+	enableCancellationOption.cliFlag,
+	reproOption.cliFlag,
+	isProductionOption.cliFlag,
+	forceNewStudioOption.cliFlag,
+	experimentalKeepAudioContextAliveOption.cliFlag,
+	bundleCacheOption.cliFlag,
+	rspackOption.cliFlag,
+	skipSkillsOption.cliFlag,
+	throwIfSiteExistsOption.cliFlag,
+	enableCrossSiteIsolationOption.cliFlag,
+	preferLosslessOption.cliFlag,
+	enableMultiprocessOnLinuxOption.cliFlag,
+	folderExpiryOption.cliFlag,
+	enableLambdaInsights.cliFlag,
+	askAIOption.cliFlag,
+] satisfies (keyof CommandLineOptions)[];
+
+export const parsedCli = minimist<CommandLineOptions>(process.argv.slice(2), {
+	boolean: BooleanFlags,
+	default: {
+		[preservePitchOnPlaybackOption.cliFlag]: null,
+		[showDiagnosticsOption.cliFlag]: null,
+		[showLayerFrameNumbersOption.cliFlag]: null,
+		[highContrastOption.cliFlag]: null,
+		[showPremountingOption.cliFlag]: null,
+		[allowHtmlInCanvasOption.cliFlag]: null,
+		[overwriteOption.cliFlag]: null,
+		[bundleCacheOption.cliFlag]: null,
+		[darkModeOption.cliFlag]: null,
+		[imageSequenceOption.cliFlag]: null,
+		[disableWebSecurityOption.cliFlag]: null,
+		[ignoreCertificateErrorsOption.cliFlag]: null,
+		[headlessOption.cliFlag]: null,
+		[keyboardShortcutsOption.cliFlag]: null,
+		[canvasTabsOption.cliFlag]: null,
+		[interactivityOption.cliFlag]: null,
+		[ipv4Option.cliFlag]: null,
+		[beepOnFinishOption.cliFlag]: null,
+		[disallowParallelEncodingOption.cliFlag]: null,
+		[disableSharedMemoryCaptureOption.cliFlag]: null,
+		[reproOption.cliFlag]: null,
+		[isProductionOption.cliFlag]: null,
+		[forceNewStudioOption.cliFlag]: null,
+		[experimentalKeepAudioContextAliveOption.cliFlag]: null,
+		[mutedOption.cliFlag]: null,
+		[enableCancellationOption.cliFlag]: null,
+		[rspackOption.cliFlag]: null,
+		[enableCrossSiteIsolationOption.cliFlag]: null,
+		[enableMultiprocessOnLinuxOption.cliFlag]: null,
+		[folderExpiryOption.cliFlag]: null,
+		[enableLambdaInsights.cliFlag]: null,
+		[askAIOption.cliFlag]: null,
+	} satisfies Partial<CommandLineOptions>,
+}) as CommandLineOptions & {
+	_: string[];
+};
+
+export const quietFlagProvided = () => parsedCli.quiet || parsedCli.q;

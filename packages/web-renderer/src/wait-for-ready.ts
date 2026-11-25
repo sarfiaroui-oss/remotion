@@ -1,0 +1,129 @@
+/* eslint-disable @typescript-eslint/no-use-before-define */
+import {Internals, type DelayRenderScope} from 'remotion';
+import {NoReactInternals} from 'remotion/no-react';
+import type {BackgroundKeepalive} from './background-keepalive';
+import type {InternalState} from './internal-state';
+import {withResolvers} from './with-resolvers';
+
+export const waitForReady = ({
+	timeoutInMilliseconds,
+	scope,
+	signal,
+	apiName,
+	internalState,
+	keepalive,
+}: {
+	timeoutInMilliseconds: number;
+	scope: DelayRenderScope;
+	signal: AbortSignal | null;
+	apiName: 'renderMediaOnWeb' | 'renderStillOnWeb' | 'renderFramesOnWeb';
+	internalState: InternalState | null;
+	keepalive: BackgroundKeepalive;
+}) => {
+	const start = performance.now();
+	const suspensionStart = Internals.getDelayRenderSuspendedTime(scope);
+	const {promise, resolve, reject} = withResolvers<void>();
+
+	let cancelled = false;
+	const subscribedFontLoads = new WeakSet<Promise<void>>();
+	let fontLoadFailure: {error: unknown} | null = null;
+
+	const check = () => {
+		const now = performance.now();
+
+		if (cancelled) {
+			return;
+		}
+
+		if (signal?.aborted) {
+			cancelled = true;
+			internalState?.addWaitForReadyTime(performance.now() - start);
+			reject(new Error(`${apiName}() was cancelled`));
+			return;
+		}
+
+		if (scope.remotion_cancelledError !== undefined) {
+			cancelled = true;
+			internalState?.addWaitForReadyTime(performance.now() - start);
+			// No serialization is needed for browser rendering. Reject with the
+			// original Error so its identity, cause chain and custom fields survive.
+			if (scope.remotion_cancelledErrorObject) {
+				reject(scope.remotion_cancelledErrorObject);
+				return;
+			}
+
+			// Keep accepting cancellations from core versions that only store a stack.
+			const stack = scope.remotion_cancelledError;
+			const message = stack.split('\n')[0].replace(/^Error: /, '');
+			const error = new Error(message);
+			error.stack = stack;
+			reject(error);
+			return;
+		}
+
+		const pendingFontLoads = NoReactInternals.getPendingFontLoads();
+		for (const fontLoad of pendingFontLoads) {
+			if (!subscribedFontLoads.has(fontLoad)) {
+				subscribedFontLoads.add(fontLoad);
+				fontLoad.catch((error: unknown) => {
+					fontLoadFailure ??= {error};
+					check();
+				});
+			}
+		}
+
+		if (fontLoadFailure !== null) {
+			cancelled = true;
+			internalState?.addWaitForReadyTime(performance.now() - start);
+			reject(fontLoadFailure.error);
+			return;
+		}
+
+		if (scope.remotion_renderReady === true && pendingFontLoads.length === 0) {
+			cancelled = true;
+			internalState?.addWaitForReadyTime(performance.now() - start);
+			resolve();
+			return;
+		}
+
+		if (
+			now -
+				start -
+				(Internals.getDelayRenderSuspendedTime(scope) - suspensionStart) >
+			timeoutInMilliseconds + 3000
+		) {
+			cancelled = true;
+			internalState?.addWaitForReadyTime(performance.now() - start);
+			reject(
+				new Error(
+					[
+						...Object.values(scope.remotion_delayRenderTimeouts).map(
+							(d) => d.label,
+						),
+						...(pendingFontLoads.length > 0
+							? [`${pendingFontLoads.length} font(s) loaded with loadFont()`]
+							: []),
+					].join(', '),
+				),
+			);
+			return;
+		}
+
+		scheduleNextCheck();
+	};
+
+	// schedule both raf and worker timer - whichever fires first wins.
+	// when tab is visible, raf fires first. when backgrounded, worker wins.
+	const scheduleNextCheck = () => {
+		const rafTick = new Promise<void>((res) => {
+			requestAnimationFrame(() => res());
+		});
+
+		Promise.race([rafTick, keepalive.waitForTick()]).then(check);
+	};
+
+	// check immediately first - if already ready, don't wait for RAF
+	check();
+
+	return promise;
+};

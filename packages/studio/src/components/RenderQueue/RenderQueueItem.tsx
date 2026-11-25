@@ -1,0 +1,253 @@
+import type {RenderJob} from '@remotion/studio-shared';
+import React, {useCallback, useContext, useEffect, useMemo} from 'react';
+import type {CanvasContent} from 'remotion';
+import {Internals} from 'remotion';
+import {getBrowserStudioOperations} from '../../helpers/browser-studio-operations';
+import {getBackgroundFromHoverState, WHITE} from '../../helpers/colors';
+import {HOVERABLE_CLASS_NAME, hoverableStyle} from '../../helpers/hoverable';
+import {
+	getOutputRoute,
+	getRenderJobOutputPath,
+} from '../../helpers/output-path';
+import {pushUrl} from '../../helpers/url-state';
+import {Row, Spacing} from '../layout';
+import type {ClientRenderJob} from './client-side-render-types';
+import {isRestoredClientJob} from './client-side-render-types';
+import type {AnyRenderJob} from './context';
+import {isClientRenderJob} from './context';
+import {renderQueueItemSubtitleStyle} from './item-style';
+import {RENDER_QUEUE_ITEM_SELECTED_CLASSNAME} from './item-style';
+import {RenderQueueCancelledMessage} from './RenderQueueCancelledMessage';
+import {
+	RenderQueueCopyToClipboard,
+	supportsCopyingToClipboard,
+} from './RenderQueueCopyToClipboard';
+import {RenderQueueDownloadItem} from './RenderQueueDownloadItem';
+import {RenderQueueError} from './RenderQueueError';
+import {RenderQueueCancelButton} from './RenderQueueItemCancelButton';
+import {RenderQueueItemStatus} from './RenderQueueItemStatus';
+import {RenderQueueOpenInFinderItem} from './RenderQueueOpenInFolder';
+import {RenderQueueOutputName} from './RenderQueueOutputName';
+import {RenderQueueProgressMessage} from './RenderQueueProgressMessage';
+import {RenderQueueRemoveItem} from './RenderQueueRemoveItem';
+import {RenderQueueRepeatItem} from './RenderQueueRepeat';
+import {RenderQueueSavingMessage} from './RenderQueueSavingMessage';
+import {useIsRenderJobCancelling} from './use-is-render-job-cancelling';
+import {useRenderOutputFileDrag} from './use-render-output-file-drag';
+
+const container: React.CSSProperties = {
+	padding: 12,
+	display: 'flex',
+	flexDirection: 'row',
+	paddingBottom: 10,
+	paddingRight: 4,
+	marginBottom: 1,
+	marginLeft: 4,
+	borderRadius: 4,
+	width: 'calc(100% - 4px)',
+};
+
+const title: React.CSSProperties = {
+	fontSize: 13,
+	lineHeight: 1,
+};
+
+const right: React.CSSProperties = {
+	flex: 1,
+	display: 'flex',
+	flexDirection: 'column',
+	overflow: 'hidden',
+};
+
+const subtitle: React.CSSProperties = {
+	maxWidth: '100%',
+	flex: 1,
+	display: 'flex',
+	overflow: 'hidden',
+};
+
+export const RenderQueueItem: React.FC<{
+	readonly job: AnyRenderJob;
+	readonly selected: boolean;
+}> = ({job, selected}) => {
+	const cancelling = useIsRenderJobCancelling(job.id);
+
+	const {setCanvasContent} = useContext(Internals.CompositionSetters);
+
+	const isClientJob = isClientRenderJob(job);
+	const outputPath = getRenderJobOutputPath(job);
+	const isBrowserStudio = getBrowserStudioOperations() !== null;
+	const {canDrag, isDragging, onDragEnd, onDragStart} =
+		useRenderOutputFileDrag(job);
+
+	const isHoverable =
+		job.status === 'done' && (isClientJob || job.type !== 'sequence');
+
+	const containerStyle: React.CSSProperties = useMemo(() => {
+		return {
+			...container,
+			...hoverableStyle({
+				idleBackground: getBackgroundFromHoverState({hovered: false, selected}),
+				hoverBackground: getBackgroundFromHoverState({
+					hovered: isHoverable,
+					selected,
+				}),
+				idleColor: WHITE,
+				hoverColor: WHITE,
+			}),
+			userSelect: 'none',
+			WebkitUserSelect: 'none',
+		};
+	}, [isHoverable, selected]);
+
+	const scrollCurrentIntoView = useCallback(() => {
+		document
+			.querySelector(`.${RENDER_QUEUE_ITEM_SELECTED_CLASSNAME}`)
+			?.scrollIntoView({behavior: 'smooth'});
+	}, []);
+
+	const clientBlobInfo = useMemo(() => {
+		if (!isClientJob || job.status !== 'done' || !job.localOutput) {
+			return null;
+		}
+
+		return {
+			getBlob: job.localOutput.getBlob,
+			width: job.metadata.width,
+			height: job.metadata.height,
+			sizeInBytes: job.metadata.sizeInBytes,
+		};
+	}, [isClientJob, job]);
+
+	const onClick: React.MouseEventHandler = useCallback(() => {
+		if (job.status !== 'done') {
+			return;
+		}
+
+		// Cannot show folders
+		if (!isClientJob && job.type === 'sequence') {
+			return;
+		}
+
+		if (clientBlobInfo) {
+			setCanvasContent((c: CanvasContent | null): CanvasContent => {
+				if (
+					c?.type === 'output-blob' &&
+					c.getBlob === clientBlobInfo.getBlob &&
+					c.displayName === job.outName
+				) {
+					return c;
+				}
+
+				return {
+					type: 'output-blob',
+					displayName: job.outName,
+					getBlob: clientBlobInfo.getBlob,
+					width: clientBlobInfo.width,
+					height: clientBlobInfo.height,
+					sizeInBytes: clientBlobInfo.sizeInBytes,
+				};
+			});
+			return;
+		}
+
+		setCanvasContent((c: CanvasContent | null): CanvasContent => {
+			const isAlreadySelected =
+				c && c.type === 'output' && c.path === outputPath;
+
+			if (isAlreadySelected && !selected) {
+				scrollCurrentIntoView();
+				return c;
+			}
+
+			return {type: 'output', path: outputPath};
+		});
+		pushUrl(getOutputRoute(outputPath));
+	}, [
+		job,
+		outputPath,
+		isClientJob,
+		clientBlobInfo,
+		scrollCurrentIntoView,
+		selected,
+		setCanvasContent,
+	]);
+
+	useEffect(() => {
+		if (selected) {
+			scrollCurrentIntoView();
+		}
+	}, [scrollCurrentIntoView, selected]);
+
+	const canCopyToClipboard =
+		job.status === 'done' &&
+		!isClientJob &&
+		supportsCopyingToClipboard(job as RenderJob);
+
+	const canRepeat =
+		(job.status === 'done' ||
+			job.status === 'failed' ||
+			job.status === 'cancelled') &&
+		!(isClientRenderJob(job) && isRestoredClientJob(job));
+
+	return (
+		<Row
+			data-render-queue-item={job.id}
+			style={containerStyle}
+			align="center"
+			onClick={onClick}
+			draggable={canDrag}
+			onDragStart={onDragStart}
+			onDragEnd={onDragEnd}
+			className={
+				selected
+					? `${HOVERABLE_CLASS_NAME} ${RENDER_QUEUE_ITEM_SELECTED_CLASSNAME}`
+					: HOVERABLE_CLASS_NAME
+			}
+		>
+			<RenderQueueItemStatus job={job} />
+			<Spacing x={1} />
+			<div style={right}>
+				<div style={title}>{job.compositionId}</div>
+				<div style={subtitle}>
+					{cancelling ? (
+						<span role="status" style={renderQueueItemSubtitleStyle}>
+							Cancelling…
+						</span>
+					) : job.status === 'done' ? (
+						<RenderQueueOutputName job={job} />
+					) : job.status === 'failed' ? (
+						<RenderQueueError job={job} />
+					) : job.status === 'running' ? (
+						<RenderQueueProgressMessage job={job} />
+					) : job.status === 'saving' ? (
+						<RenderQueueSavingMessage />
+					) : job.status === 'cancelled' ? (
+						<RenderQueueCancelledMessage />
+					) : null}
+				</div>
+			</div>
+			<Spacing x={1} />
+			{!isDragging ? (
+				<>
+					{canCopyToClipboard ? (
+						<RenderQueueCopyToClipboard job={job as RenderJob} />
+					) : null}
+					{canRepeat ? <RenderQueueRepeatItem job={job} /> : null}
+					{job.status === 'running' || job.status === 'idle' ? (
+						<RenderQueueCancelButton job={job} />
+					) : job.status === 'saving' || isBrowserStudio ? null : (
+						<RenderQueueRemoveItem job={job} />
+					)}
+					{job.status === 'done' ? (
+						clientBlobInfo ? (
+							<RenderQueueDownloadItem job={job as ClientRenderJob} />
+						) : isBrowserStudio ? null : (
+							<RenderQueueOpenInFinderItem job={job} />
+						)
+					) : null}
+				</>
+			) : null}
+		</Row>
+	);
+};

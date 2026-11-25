@@ -1,0 +1,223 @@
+import {Artifact, useCurrentFrame} from 'remotion';
+import {expect, test} from 'vitest';
+import type {EmittedArtifact} from '../artifact';
+import {renderFramesOnWeb, renderStillOnWeb} from '../index';
+import {renderMediaOnWeb} from '../render-media-on-web';
+import '../symbol-dispose';
+
+test('should be able to render an artifact for still', async () => {
+	const Component: React.FC = () => {
+		return <Artifact filename="test.txt" content="Hello World!" />;
+	};
+
+	const artifacts: EmittedArtifact[] = [];
+
+	await renderStillOnWeb({
+		licenseKey: 'free-license',
+		composition: {
+			component: Component,
+			id: 'artifact-test',
+			width: 100,
+			height: 100,
+			fps: 30,
+			durationInFrames: 1,
+			calculateMetadata: null,
+		},
+		frame: 0,
+		onArtifact: (artifact) => {
+			artifacts.push(artifact);
+		},
+	});
+
+	expect(artifacts).toEqual([
+		{
+			filename: 'test.txt',
+			content: 'Hello World!',
+			frame: 0,
+			downloadBehavior: null,
+		},
+	]);
+});
+
+test('should fail to render multiple artifacts with the same filename', async (t) => {
+	const Component: React.FC = () => {
+		return <Artifact filename="test.txt" content="Hello World!" />;
+	};
+
+	const artifacts: EmittedArtifact[] = [];
+
+	const prom = renderMediaOnWeb({
+		licenseKey: 'free-license',
+		composition: {
+			component: Component,
+			id: 'artifact-test',
+			width: 100,
+			height: 100,
+			fps: 30,
+			durationInFrames: 3,
+			calculateMetadata: null,
+		},
+		onArtifact: (artifact) => {
+			artifacts.push(artifact);
+		},
+		outputTarget:
+			t.task.file.projectName === 'webkit' ? 'arraybuffer' : 'web-fs',
+	});
+	await expect(prom).rejects.toThrow(
+		'An artifact with output "test.txt" was already registered at frame 0, but now registered again at frame 1. Artifacts must have unique names. https://remotion.dev/docs/artifacts',
+	);
+});
+
+test('should be able to emit a thumbnail', async () => {
+	const Component: React.FC = () => {
+		return <Artifact filename="thumbnail.png" content={Artifact.Thumbnail} />;
+	};
+
+	const artifacts: EmittedArtifact[] = [];
+
+	await renderStillOnWeb({
+		licenseKey: 'free-license',
+		composition: {
+			component: Component,
+			id: 'artifact-test',
+			width: 100,
+			height: 100,
+			fps: 30,
+			durationInFrames: 1,
+			calculateMetadata: null,
+		},
+		frame: 0,
+		onArtifact: (artifact) => {
+			artifacts.push(artifact);
+		},
+	});
+
+	expect(artifacts).toHaveLength(1);
+	expect(artifacts[0].filename).toBe('thumbnail.png');
+	expect(artifacts[0].frame).toBe(0);
+	expect(artifacts[0].content).toBeInstanceOf(Uint8Array);
+	expect(artifacts[0].downloadBehavior).toBe(null);
+	// Verify it's actually PNG data by checking PNG signature
+	const pngSignature = new Uint8Array([137, 80, 78, 71, 13, 10, 26, 10]);
+	const content = artifacts[0].content as Uint8Array;
+	expect(content.slice(0, 8)).toEqual(pngSignature);
+});
+
+test('should succeed to render multiple artifacts with renderMediaOnWeb()', async (t) => {
+	const Component: React.FC = () => {
+		const frame = useCurrentFrame();
+		return (
+			<>
+				{frame === 0 && (
+					<Artifact filename="frame-0.txt" content="Content for frame 0" />
+				)}
+				{frame === 1 && (
+					<Artifact filename="frame-1.txt" content="Content for frame 1" />
+				)}
+				{frame === 2 && (
+					<Artifact filename="frame-2.txt" content="Content for frame 2" />
+				)}
+			</>
+		);
+	};
+
+	const artifacts: EmittedArtifact[] = [];
+
+	await renderMediaOnWeb({
+		licenseKey: 'free-license',
+		composition: {
+			component: Component,
+			id: 'artifact-test',
+			width: 100,
+			height: 100,
+			fps: 30,
+			durationInFrames: 3,
+			calculateMetadata: null,
+		},
+		onArtifact: (artifact) => {
+			artifacts.push(artifact);
+		},
+		outputTarget:
+			t.task.file.projectName === 'webkit' ? 'arraybuffer' : 'web-fs',
+	});
+
+	expect(artifacts).toEqual([
+		{
+			filename: 'frame-0.txt',
+			content: 'Content for frame 0',
+			frame: 0,
+			downloadBehavior: null,
+		},
+		{
+			filename: 'frame-1.txt',
+			content: 'Content for frame 1',
+			frame: 1,
+			downloadBehavior: null,
+		},
+		{
+			filename: 'frame-2.txt',
+			content: 'Content for frame 2',
+			frame: 2,
+			downloadBehavior: null,
+		},
+	]);
+});
+
+test('renderFramesOnWeb() emits uniquely named artifacts for each frame', async () => {
+	const Component: React.FC = () => {
+		const frame = useCurrentFrame();
+		return (
+			<Artifact filename={`frame-${frame}.txt`} content={`Frame ${frame}`} />
+		);
+	};
+
+	const artifacts: EmittedArtifact[] = [];
+
+	await renderFramesOnWeb({
+		licenseKey: 'free-license',
+		composition: {
+			component: Component,
+			id: 'batch-artifacts',
+			width: 10,
+			height: 10,
+			fps: 30,
+			durationInFrames: 30,
+		},
+		frames: [10, 0, 20],
+		onArtifact: (artifact) => artifacts.push(artifact),
+	});
+	expect(
+		artifacts.map(({filename, content, frame}) => ({filename, content, frame})),
+	).toEqual([
+		{filename: 'frame-0.txt', content: 'Frame 0', frame: 0},
+		{filename: 'frame-10.txt', content: 'Frame 10', frame: 10},
+		{filename: 'frame-20.txt', content: 'Frame 20', frame: 20},
+	]);
+});
+
+test('renderFramesOnWeb() rejects the same artifact filename on separate frames', async () => {
+	const Component: React.FC = () => {
+		return <Artifact filename="test.txt" content="Hello World!" />;
+	};
+
+	const artifacts: EmittedArtifact[] = [];
+
+	await expect(
+		renderFramesOnWeb({
+			licenseKey: 'free-license',
+			composition: {
+				component: Component,
+				id: 'batch-artifacts-duplicate',
+				width: 10,
+				height: 10,
+				fps: 30,
+				durationInFrames: 30,
+			},
+			frames: [10, 0],
+			onArtifact: (artifact) => artifacts.push(artifact),
+		}),
+	).rejects.toThrow(
+		'An artifact with output "test.txt" was already registered at frame 0, but now registered again at frame 10. Artifacts must have unique names. https://remotion.dev/docs/artifacts',
+	);
+	expect(artifacts.map(({frame}) => frame)).toEqual([0]);
+});

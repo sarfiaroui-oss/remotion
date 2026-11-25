@@ -1,0 +1,45 @@
+---
+image: https://remotion.media/docs/generated/articles-docs-shapes-make-star.png
+title: makeStar()
+crumb: "@remotion/shapes"
+---
+
+import {MakeShapeSeeAlso, ShapeOptions, MakeShapeReturnType} from "../../components/shapes/shapes-info"
+
+_Part of the [`@remotion/shapes`](/docs/shapes) package._
+
+Generates a star SVG path.
+
+## Example
+
+```tsx twoslash title="star.ts"
+import { makeStar } from "@remotion/shapes";
+
+const { path, width, height, transformOrigin, instructions } = makeStar({
+  innerRadius: 150,
+  outerRadius: 200,
+  points: 5,
+});
+
+console.log(path); // M 190.21130325903073 0 L 278.3790911029017 78.64745084375788 L 380.42260651806146 138.19660112501052 L 332.8697807033037 246.3525491562421 L 307.7683537175254 361.8033988749895 L 190.21130325903073 350 L 72.65425280053613 361.8033988749895 L 47.55282581475771 246.35254915624213 L 0 138.19660112501055 L 102.04351541515975 78.6474508437579 L 190.21130325903073 0 Z
+console.log(width); // 380.42260651806146
+console.log(height); // 361.8033988749895
+console.log(transformOrigin); // '190.21130325903073 200'
+console.log(instructions); // '[{type: "M"}, ...]'
+```
+
+## Arguments
+
+<ShapeOptions shape="star"/>
+
+## Return type
+
+<MakeShapeReturnType shape="star"/>
+
+## Compatibility
+
+<CompatibilityTable chrome firefox safari nodejs bun serverlessFunctions clientSideRendering serverSideRendering player studio />
+
+## See also
+
+<MakeShapeSeeAlso shape="star"/>

@@ -1,0 +1,28 @@
+---
+image: https://remotion.media/docs/generated/articles-docs-zod-types-z-color.png
+title: zColor()
+crumb: '@remotion/zod-types'
+---
+
+Using `zColor()`, you can specify in your [schema](/docs/schemas) that a string has to be a color.
+
+In the Remotion Studio, a color picker will be displayed, allowing you to change and validate the color.
+
+```tsx twoslash
+import {z} from 'zod';
+import {zColor} from '@remotion/zod-types';
+
+const myCompSchema = z.object({
+  color: zColor(),
+});
+```
+
+## Compatibility
+
+<CompatibilityTable chrome firefox safari nodejs bun serverlessFunctions clientSideRendering serverSideRendering player studio />
+
+Schema validation works in all listed environments. The visual editor is only available in Remotion Studio.
+
+## See also
+
+- [Defining a schema for your props](/docs/schemas)

@@ -1,0 +1,158 @@
+import React, {useCallback, useContext} from 'react';
+import {
+	CURRENT_COLOR,
+	FAIL_COLOR,
+	LIGHT_TEXT,
+	TRANSPARENT,
+	WHITE,
+} from '../../helpers/colors';
+import {
+	FOCUS_VISIBLE_ONLY_CLASS_NAME,
+	HOVERABLE_CLASS_NAME,
+	hoverableStyle,
+} from '../../helpers/hoverable';
+import {SetSelectedModalContext} from '../../state/modals';
+import {
+	CircularProgress,
+	RENDER_STATUS_INDICATOR_SIZE,
+} from './CircularProgress';
+import type {AnyRenderJob} from './context';
+import {isClientRenderJob} from './context';
+
+const iconStyle: React.CSSProperties = {
+	height: RENDER_STATUS_INDICATOR_SIZE,
+	width: RENDER_STATUS_INDICATOR_SIZE,
+};
+
+const invisibleStyle: React.CSSProperties = {
+	appearance: 'none',
+	border: 'none',
+	padding: 0,
+	cursor: 'default',
+	display: 'flex',
+};
+
+const doneStyle: React.CSSProperties = {
+	...invisibleStyle,
+	...hoverableStyle({
+		idleBackground: TRANSPARENT,
+		hoverBackground: TRANSPARENT,
+		idleColor: LIGHT_TEXT,
+		hoverColor: WHITE,
+	}),
+};
+
+export const RenderQueueItemStatus: React.FC<{
+	readonly job: AnyRenderJob;
+}> = ({job}) => {
+	const {setSelectedModal} = useContext(SetSelectedModalContext);
+	const isClientJob = isClientRenderJob(job);
+
+	const onClick: React.MouseEventHandler = useCallback(
+		(e) => {
+			e.stopPropagation();
+			setSelectedModal({
+				type: 'render-progress',
+				jobId: job.id,
+			});
+		},
+		[job.id, setSelectedModal],
+	);
+
+	if (job.status === 'failed') {
+		return (
+			<button
+				type="button"
+				aria-label="Show render details"
+				className={FOCUS_VISIBLE_ONLY_CLASS_NAME}
+				style={invisibleStyle}
+				onClick={onClick}
+			>
+				<svg style={iconStyle} viewBox="0 0 512 512">
+					<path
+						fill={FAIL_COLOR}
+						d="M0 160V352L160 512H352L512 352V160L352 0H160L0 160zm353.9 32l-17 17-47 47 47 47 17 17L320 353.9l-17-17-47-47-47 47-17 17L158.1 320l17-17 47-47-47-47-17-17L192 158.1l17 17 47 47 47-47 17-17L353.9 192z"
+					/>
+				</svg>
+			</button>
+		);
+	}
+
+	if (job.status === 'idle') {
+		return (
+			<svg style={iconStyle} viewBox="0 0 512 512">
+				<path
+					fill={LIGHT_TEXT}
+					d="M256 512C114.6 512 0 397.4 0 256S114.6 0 256 0S512 114.6 512 256s-114.6 256-256 256zM232 120V256c0 8 4 15.5 10.7 20l96 64c11 7.4 25.9 4.4 33.3-6.7s4.4-25.9-6.7-33.3L280 243.2V120c0-13.3-10.7-24-24-24s-24 10.7-24 24z"
+				/>
+			</svg>
+		);
+	}
+
+	if (job.status === 'done') {
+		return (
+			<button
+				type="button"
+				aria-label="Show render details"
+				className={`${HOVERABLE_CLASS_NAME} ${FOCUS_VISIBLE_ONLY_CLASS_NAME}`}
+				style={doneStyle}
+				onClick={onClick}
+			>
+				<svg style={iconStyle} viewBox="0 0 512 512">
+					<path
+						fill={CURRENT_COLOR}
+						d="M256 512c141.4 0 256-114.6 256-256S397.4 0 256 0S0 114.6 0 256S114.6 512 256 512zM369 209L241 337l-17 17-17-17-64-64-17-17L160 222.1l17 17 47 47L335 175l17-17L385.9 192l-17 17z"
+					/>
+				</svg>
+			</button>
+		);
+	}
+
+	if (job.status === 'running') {
+		let progressValue: number;
+		if (isClientJob) {
+			progressValue = job.progress.progress;
+		} else {
+			progressValue = job.progress.value;
+		}
+
+		return (
+			<button
+				type="button"
+				aria-label="Show render details"
+				className={FOCUS_VISIBLE_ONLY_CLASS_NAME}
+				style={invisibleStyle}
+				onClick={onClick}
+			>
+				<CircularProgress progress={Math.max(0.07, progressValue)} />
+			</button>
+		);
+	}
+
+	if (job.status === 'saving') {
+		return (
+			<button
+				type="button"
+				aria-label="Show render details"
+				className={FOCUS_VISIBLE_ONLY_CLASS_NAME}
+				style={invisibleStyle}
+				onClick={onClick}
+			>
+				<CircularProgress progress={0.95} />
+			</button>
+		);
+	}
+
+	if (job.status === 'cancelled') {
+		return (
+			<svg style={iconStyle} viewBox="0 0 512 512">
+				<path
+					fill={LIGHT_TEXT}
+					d="M0 160V352L160 512H352L512 352V160L352 0H160L0 160zm353.9 32l-17 17-47 47 47 47 17 17L320 353.9l-17-17-47-47-47 47-17 17L158.1 320l17-17 47-47-47-47-17-17L192 158.1l17 17 47 47 47-47 17-17L353.9 192z"
+				/>
+			</svg>
+		);
+	}
+
+	throw new Error('Unknown job status');
+};

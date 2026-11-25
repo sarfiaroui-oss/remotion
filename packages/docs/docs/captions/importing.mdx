@@ -1,0 +1,91 @@
+---
+image: https://remotion.media/docs/generated/articles-docs-captions-importing.png
+sidebar_label: Importing
+title: Importing .srt or .vtt subtitles into Remotion
+crumb: Captions
+---
+
+# Importing .srt or .vtt subtitles into Remotion
+
+If you have an existing subtitle file, you can import it into Remotion:
+
+- using [`parseSrt()`](/docs/captions/parse-srt) for `.srt` files
+- using [`parseVtt()`](/docs/captions/parse-vtt) for `.vtt` WebVTT files.
+
+These APIs take a string. Read the subtitle file as text before calling either function.  
+Both APIs return captions in the standard Remotion [`Caption[]`](/docs/captions/caption) format.
+
+## Reading an .srt file
+
+Use [`staticFile()`](/docs/staticfile) to reference an `.srt` file in your `public` folder, then fetch and parse it:
+
+```tsx twoslash title="Importing captions from .srt"
+import {parseSrt} from '@remotion/captions';
+import {staticFile} from 'remotion';
+
+const response = await fetch(staticFile('subtitles.srt'));
+const text = await response.text();
+const {captions} = parseSrt({input: text});
+```
+
+## Reading a .vtt file<AvailableFrom v="4.0.537" />
+
+Use [`staticFile()`](/docs/staticfile) to reference a `.vtt` file in your `public` folder, then fetch and parse it.
+
+```tsx twoslash title="Importing captions from .vtt"
+import {parseVtt} from '@remotion/captions';
+import {staticFile} from 'remotion';
+
+const response = await fetch(staticFile('subtitles.vtt'));
+const text = await response.text();
+const {captions} = parseVtt({input: text});
+```
+
+## Fetching captions in a component
+
+Use [`useDelayRender()`](/docs/use-delay-render) to wait for the captions to be successfully loaded, before rendering the component.
+
+```tsx twoslash title="Importing captions from .srt"
+import {useState, useEffect, useCallback} from 'react';
+import {staticFile, useDelayRender} from 'remotion';
+import {parseSrt} from '@remotion/captions';
+import type {Caption} from '@remotion/captions';
+
+export const MyComponent: React.FC = () => {
+  const [captions, setCaptions] = useState<Caption[] | null>(null);
+  const {delayRender, continueRender, cancelRender} = useDelayRender();
+  const [handle] = useState(() => delayRender());
+
+  const fetchCaptions = useCallback(async () => {
+    try {
+      const response = await fetch(staticFile('subtitles.srt'));
+      const text = await response.text();
+      const {captions: parsed} = parseSrt({input: text});
+      setCaptions(parsed);
+      continueRender(handle);
+    } catch (e) {
+      cancelRender(e);
+    }
+  }, [continueRender, cancelRender, handle]);
+
+  useEffect(() => {
+    fetchCaptions();
+  }, [fetchCaptions]);
+
+  if (!captions) {
+    return null;
+  }
+
+  return <>{/* Use captions here */}</>;
+};
+```
+
+You can also [`fetch()`](https://developer.mozilla.org/en-US/docs/Web/API/Fetch_API) a remote file via URL.
+
+## See also
+
+- [Captions guide](/docs/captions)
+- [`parseSrt()`](/docs/captions/parse-srt)
+- [`parseVtt()`](/docs/captions/parse-vtt)
+- [Displaying captions](/docs/captions/displaying)
+- [`Caption` type](/docs/captions/caption)

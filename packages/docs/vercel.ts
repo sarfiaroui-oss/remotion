@@ -1,0 +1,799 @@
+import {routes, type VercelConfig} from '@vercel/config/v1';
+import {getTransformedRoutes} from '@vercel/routing-utils';
+
+const accountOrigin = 'https://www.remotion.pro';
+const accountHosts = [
+	{
+		type: 'host' as const,
+		value: '(?:www\\.)?remotion\\.dev|remotion(?:-[a-z0-9-]+)?\\.vercel\\.app',
+	},
+];
+const accountPaths = [
+	'/pricing',
+	'/compliance',
+	'/compliance.md',
+	'/login',
+	'/dashboard',
+	'/dashboard/:path*',
+	'/projects',
+	'/projects/:path*',
+	'/settings',
+	'/store',
+	'/store/:path*',
+	'/admin',
+	'/admin/:path*',
+	'/auth-error',
+	'/check-mailbox',
+	'/magic-link',
+	'/change-email',
+	'/api/:path*',
+];
+
+const browserStudioIsolationHeaders = [
+	{key: 'Cross-Origin-Embedder-Policy', value: 'require-corp'},
+	{key: 'Cross-Origin-Opener-Policy', value: 'same-origin'},
+];
+
+const browserStudioAssetHeaders = [
+	{key: 'Cache-Control', value: 'public, max-age=31536000, immutable'},
+	...browserStudioIsolationHeaders,
+];
+
+const siteConfig: VercelConfig = {
+	headers: [
+		...accountPaths.map((source) =>
+			routes.header(
+				source,
+				[{key: 'Cache-Control', value: 'private, no-store'}],
+				{
+					has: accountHosts,
+				},
+			),
+		),
+		routes.header('/assets/(.*)', browserStudioAssetHeaders),
+		routes.header(
+			'/__remotion_browser_studio_workspace__/commits/(.*)',
+			browserStudioAssetHeaders,
+		),
+		routes.header('/_raw/docs/(.*).md', [
+			{key: 'Content-Type', value: 'text/plain; charset=utf-8'},
+			{key: 'Vary', value: 'Accept'},
+		]),
+		routes.header('/_raw/elements/(.*).md', [
+			{key: 'Content-Type', value: 'text/plain; charset=utf-8'},
+			{key: 'Vary', value: 'Accept'},
+		]),
+		routes.header('/img/gt-planar(.*)', [
+			{key: 'Access-Control-Allow-Credentials', value: 'true'},
+			{key: 'Access-Control-Allow-Origin', value: '*'},
+			{
+				key: 'Access-Control-Allow-Methods',
+				value: 'GET,OPTIONS,PATCH,DELETE,POST,PUT',
+			},
+			{
+				key: 'Access-Control-Allow-Headers',
+				value:
+					'X-CSRF-Token, X-Requested-With, Accept, Accept-Version, Content-Length, Content-MD5, Content-Type, Date, X-Api-Version',
+			},
+		]),
+		...[
+			{type: 'query' as const, key: 'remotion-studio', value: 'true'},
+			{type: 'header' as const, key: 'sec-fetch-dest', value: 'iframe'},
+		].map((condition) =>
+			routes.header(
+				'/elements/:path*',
+				[
+					{key: 'Cross-Origin-Embedder-Policy', value: 'require-corp'},
+					{key: 'Cross-Origin-Resource-Policy', value: 'cross-origin'},
+				],
+				{has: [condition]},
+			),
+		),
+		routes.header('/new(.*)', browserStudioIsolationHeaders),
+		...['/new', '/new/', '/new.html', '/new/index.html'].map((source) =>
+			routes.header(source, [{key: 'Cache-Control', value: 'no-store'}]),
+		),
+		// The Vibe Code editor compiles with the browser bundler, which needs
+		// cross-origin isolation for the editor, its preview iframe and the
+		// compiler worker.
+		routes.header('/experimental_sdk(.*)', browserStudioIsolationHeaders),
+		...[
+			'/experimental_sdk',
+			'/experimental_sdk/',
+			'/experimental_sdk/index.html',
+		].map((source) =>
+			routes.header(source, [{key: 'Cache-Control', value: 'no-store'}]),
+		),
+		routes.header('/convert/assets/(.*)', [
+			{key: 'Cross-Origin-Embedder-Policy', value: 'require-corp'},
+			{key: 'Cross-Origin-Opener-Policy', value: 'same-origin'},
+		]),
+	],
+	rewrites: [
+		{
+			source: '/portal-sitemap.xml',
+			destination: `${accountOrigin}/sitemap.xml`,
+			has: accountHosts,
+		},
+		...[
+			...accountPaths,
+			'/_next/:path*',
+			'/animated-captions-og.png',
+			'/colorsandshapes-ogimage.png',
+			'/cube-presentation-og.jpg',
+			'/editor-splash.png',
+			'/editor-starter-captioning.png',
+			'/editor-starter-export.png',
+			'/editor-starter-inspector.png',
+			'/editor-starter-layer-management.png',
+			'/gt-planar-black.woff2',
+			'/gt-planar-bold.woff2',
+			'/gt-planar-medium.woff2',
+			'/gt-planar-regular.woff2',
+			'/info-icon-for-email.png',
+			'/last-stable.png',
+			'/latest-stable-release-banner.png',
+			'/latest-stable-release.png',
+			'/logo-small.png',
+			'/mapbox-og-image.png',
+			'/mapsnap-studio.png',
+			'/mapsnap.png',
+			'/mux-logo.png',
+			'/npmbanner.png',
+			'/npmkiosk-og-image.png',
+			'/npmkiosk.png',
+			'/og-image.png',
+			'/recorder-1.png',
+			'/recorder-2.png',
+			'/remotion-timeline-square.jpg',
+			'/remotion-wordmark.png',
+			'/timeline-cover.png',
+			'/timeline-og-image.png',
+			'/timeline-store-item.png',
+			'/timelinescreen1.png',
+			'/timelinescreen2.png',
+			'/timelinescreen3.png',
+			'/timelinescreen4.png',
+			'/watercolor-map-og-image.png',
+			'/wordmark.png',
+		].map((source) => ({
+			source,
+			destination: `${accountOrigin}${source}`,
+			has: accountHosts,
+		})),
+	],
+	redirects: [
+		...accountPaths
+			.filter((source) => source !== '/pricing')
+			.map((source) => {
+				const path = source.replace(/:path\*$/, ':path+');
+				return routes.redirect(`${path}/`, path, {
+					permanent: true,
+					has: accountHosts,
+				});
+			}),
+		routes.redirect('/sitemap', '/sitemap.xml', {permanent: true}),
+		...[
+			['/opentimeline', '/docs/opentimeline'],
+			['/docs/import-opentimeline', '/docs/opentimeline/import'],
+			['/docs/export-opentimeline', '/docs/opentimeline/export'],
+		].flatMap(([source, destination]) => [
+			routes.redirect(source, destination, {permanent: true}),
+			routes.redirect(`${source}/`, destination, {permanent: true}),
+			routes.redirect(`${source}.md`, `${destination}.md`, {permanent: true}),
+		]),
+		routes.redirect(
+			'/docs/starburst',
+			'/elements/backgrounds/rotating-starburst',
+			{
+				permanent: true,
+			},
+		),
+		routes.redirect(
+			'/docs/starburst.md',
+			'/elements/backgrounds/rotating-starburst.md',
+			{permanent: true},
+		),
+		routes.redirect('/docs/using-audio', '/docs/video-and-audio', {
+			permanent: true,
+		}),
+		routes.redirect('/docs/using-audio.md', '/docs/video-and-audio.md', {
+			permanent: true,
+		}),
+		routes.redirect('/docs/audio/importing', '/docs/videos', {
+			permanent: true,
+		}),
+		routes.redirect('/docs/audio/importing.md', '/docs/videos.md', {
+			permanent: true,
+		}),
+		routes.redirect('/docs/audio/from-video', '/docs/videos#audio-from-video', {
+			permanent: true,
+		}),
+		routes.redirect(
+			'/docs/audio/from-video.md',
+			'/docs/videos.md#audio-from-video',
+			{permanent: true},
+		),
+		routes.redirect('/docs/audio/delaying', '/docs/audio/trimming#delaying', {
+			permanent: true,
+		}),
+		routes.redirect(
+			'/docs/audio/delaying.md',
+			'/docs/audio/trimming.md#delaying',
+			{
+				permanent: true,
+			},
+		),
+		routes.redirect('/docs/audio/muting', '/docs/audio/volume#muting', {
+			permanent: true,
+		}),
+		routes.redirect('/docs/audio/muting.md', '/docs/audio/volume.md#muting', {
+			permanent: true,
+		}),
+		routes.redirect(
+			'/docs/studio/creating-elements',
+			'/docs/elements/creating',
+			{permanent: true},
+		),
+		routes.redirect(
+			'/docs/studio/creating-elements.md',
+			'/docs/elements/creating.md',
+			{permanent: true},
+		),
+		routes.redirect(
+			'/docs/studio/element-libraries',
+			'/docs/elements/libraries',
+			{
+				permanent: true,
+			},
+		),
+		routes.redirect(
+			'/docs/studio/element-libraries.md',
+			'/docs/elements/libraries.md',
+			{permanent: true},
+		),
+		routes.redirect(
+			'/docs/studio-protocol/component-library-integration',
+			'/docs/elements/libraries',
+			{permanent: true},
+		),
+		routes.redirect(
+			'/docs/studio-protocol/component-library-integration.md',
+			'/docs/elements/libraries.md',
+			{permanent: true},
+		),
+		routes.redirect('/docs/reusability', '/docs/composing', {
+			permanent: true,
+		}),
+		routes.redirect('/docs/reusability.md', '/docs/composing.md', {
+			permanent: true,
+		}),
+		routes.redirect('/docs/the-fundamentals', '/docs/idea', {
+			permanent: true,
+		}),
+		routes.redirect('/docs/the-fundamentals.md', '/docs/idea.md', {
+			permanent: true,
+		}),
+		routes.redirect('/docs/preview', '/docs/your-first-video', {
+			permanent: true,
+		}),
+		routes.redirect('/docs/preview.md', '/docs/your-first-video.md', {
+			permanent: true,
+		}),
+		routes.redirect('/docs/audio/order-of-operations', '/docs/timing', {
+			permanent: true,
+		}),
+		routes.redirect('/docs/audio/order-of-operations.md', '/docs/timing.md', {
+			permanent: true,
+		}),
+		routes.redirect('/experimental_new', '/new', {permanent: true}),
+		routes.redirect('/elements/guidelines', '/docs/elements/creating', {
+			permanent: true,
+		}),
+		routes.redirect('/elements/guidelines.md', '/docs/elements/creating.md', {
+			permanent: true,
+		}),
+		routes.redirect('/elements/contributing', '/docs/contributing/elements', {
+			permanent: true,
+		}),
+		routes.redirect(
+			'/elements/contributing.md',
+			'/docs/contributing/elements.md',
+			{permanent: true},
+		),
+		routes.redirect(
+			'/elements/submit-an-element',
+			'/docs/contributing/elements',
+			{permanent: true},
+		),
+		routes.redirect(
+			'/elements/submit-an-element.md',
+			'/docs/contributing/elements.md',
+			{permanent: true},
+		),
+		routes.redirect(
+			'/elements/overlays/lower-third',
+			'/elements/overlays/name-lower-third',
+			{permanent: true},
+		),
+		routes.redirect(
+			'/elements/overlays/lower-third.md',
+			'/elements/overlays/name-lower-third.md',
+			{permanent: true},
+		),
+		routes.redirect(
+			'/elements/overlays/social-endcard',
+			'/elements/youtube/youtube-end-card',
+			{permanent: true},
+		),
+		routes.redirect(
+			'/elements/overlays/social-endcard.md',
+			'/elements/youtube/youtube-end-card.md',
+			{permanent: true},
+		),
+		routes.redirect(
+			'/changelog',
+			'https://github.com/remotion-dev/remotion/releases',
+			{permanent: false},
+		),
+		routes.redirect('/discord', 'https://discord.gg/6VzzNDwUwV', {
+			permanent: false,
+		}),
+		routes.redirect('/booking', 'https://cal.com/remotion', {
+			permanent: false,
+		}),
+		routes.redirect(
+			'/coc',
+			'https://github.com/remotion-dev/remotion/blob/main/CODE-OF-CONDUCT.md',
+			{permanent: false},
+		),
+		...['/license', '/license/'].map((source) =>
+			routes.redirect(source, '/pricing', {permanent: false}),
+		),
+		routes.redirect('/pricing/', '/pricing', {permanent: true}),
+		routes.redirect('/timeout', '/docs/timeout', {permanent: false}),
+		routes.redirect('/html-in-canvas', '/docs/html-in-canvas', {
+			permanent: false,
+		}),
+		routes.redirect('/acknowledgements', '/docs/acknowledgements', {
+			permanent: false,
+		}),
+		routes.redirect(
+			'/issue',
+			'https://github.com/remotion-dev/remotion/issues/new/choose',
+			{permanent: false},
+		),
+		routes.redirect('/inbox', 'https://github.com/remotion-dev/inbox/issues', {
+			permanent: false,
+		}),
+		routes.redirect(
+			'/vision',
+			'https://github.com/remotion-dev/remotion/issues/9081',
+			{permanent: false},
+		),
+		routes.redirect('/skia', '/docs/skia', {permanent: false}),
+		routes.redirect('/webmcp', '/docs/agents/webmcp', {permanent: false}),
+		routes.redirect('/gif', '/docs/gif', {permanent: false}),
+		routes.redirect('/gsap', '/docs/gsap', {permanent: false}),
+		routes.redirect('/lottie', '/docs/lottie', {permanent: false}),
+		routes.redirect('/mediabunny', '/docs/mediabunny', {permanent: false}),
+		routes.redirect('/paths', '/docs/paths', {permanent: false}),
+		routes.redirect('/shapes', '/docs/shapes', {permanent: false}),
+		routes.redirect('/api', '/docs/api', {permanent: false}),
+		routes.redirect('/why', '/docs/why', {permanent: false}),
+		routes.redirect('/options', '/docs/options', {permanent: false}),
+		routes.redirect('/terminology', '/docs/terminology', {permanent: false}),
+		routes.redirect(
+			'/hacktoberfest',
+			'https://github.com/remotion-dev/remotion/issues/1365',
+			{permanent: false},
+		),
+		routes.redirect('/motion-blur', '/docs/motion-blur', {permanent: false}),
+		routes.redirect('/docs/motion-blur-guide', '/docs/motion-blur', {
+			permanent: true,
+		}),
+		routes.redirect('/docs/motion-blur-guide.md', '/docs/motion-blur.md', {
+			permanent: true,
+		}),
+		routes.redirect('/noise', '/docs/noise', {permanent: false}),
+		routes.redirect(
+			'/docs/get-audio-duration',
+			'/docs/get-audio-duration-in-seconds',
+			{permanent: true},
+		),
+		routes.redirect(
+			'/docs/get-compositions',
+			'/docs/renderer/get-compositions',
+			{permanent: true},
+		),
+		routes.redirect('/docs/webpack', '/docs/bundlers', {permanent: true}),
+		routes.redirect(
+			'/docs/stitch-frames-to-video',
+			'/docs/renderer/stitch-frames-to-video',
+			{permanent: true},
+		),
+		routes.redirect('/docs/render-still', '/docs/renderer/render-still', {
+			permanent: true,
+		}),
+		routes.redirect('/docs/render-frames', '/docs/renderer/render-frames', {
+			permanent: true,
+		}),
+		routes.redirect(
+			'/docs/motion-blur/motion-blur',
+			'/docs/motion-blur/trail',
+			{
+				permanent: true,
+			},
+		),
+		routes.redirect('/support', '/docs/support', {permanent: true}),
+		routes.redirect('/webcodecs', '/docs/webcodecs', {permanent: true}),
+		routes.redirect('/video-matting', '/docs/video-matting-guide', {
+			permanent: true,
+		}),
+		routes.redirect(
+			'/docs/miscellaneous/parse-media-vs-get-video-metadata',
+			'/docs/mediabunny/metadata',
+			{permanent: true},
+		),
+		routes.redirect('/docs/miscellaneous/snippets/hls', '/docs/hls', {
+			permanent: true,
+		}),
+		routes.redirect(
+			'/docs/miscellaneous/snippets/align-duration',
+			'/docs/videos/align-duration',
+			{permanent: true},
+		),
+		routes.redirect(
+			'/docs/miscellaneous/snippets/accelerated-video',
+			'/docs/videos/accelerated-video',
+			{permanent: true},
+		),
+		routes.redirect(
+			'/docs/miscellaneous/snippets/jumpcuts',
+			'/docs/videos/jumpcuts',
+			{permanent: true},
+		),
+		routes.redirect(
+			'/docs/miscellaneous/snippets/different-segments-at-different-speeds',
+			'/docs/videos/different-segments-at-different-speeds',
+			{permanent: true},
+		),
+		routes.redirect(
+			'/docs/videos/freeze-portions',
+			'/docs/miscellaneous/snippets/freeze-portions',
+			{permanent: true},
+		),
+		routes.redirect(
+			'/docs/video-manipulation',
+			'/docs/videos/video-manipulation',
+			{permanent: true},
+		),
+		routes.redirect('/docs/videos/greenscreen', '/docs/greenscreen', {
+			permanent: true,
+		}),
+		routes.redirect('/docs/videos/video-tags', '/docs/video-tags', {
+			permanent: true,
+		}),
+		routes.redirect('/docs/videos/hls', '/docs/hls', {
+			permanent: true,
+		}),
+		routes.redirect('/docs/media-fragments', '/docs/videos/media-fragments', {
+			permanent: true,
+		}),
+		routes.redirect('/docs/player/api', '/docs/player/player', {
+			permanent: true,
+		}),
+		routes.redirect('/github', 'https://github.com/remotion-dev/remotion', {
+			permanent: false,
+		}),
+		routes.redirect('/docs/lottie/after-effects', '/docs/after-effects', {
+			permanent: false,
+		}),
+		routes.redirect('/docs/miscellaneous/render-all', '/docs/render-all', {
+			permanent: false,
+		}),
+		routes.redirect('/docs/overlays', '/docs/overlay', {permanent: false}),
+		routes.redirect('/docs/cli/preview', '/docs/cli/studio', {
+			permanent: false,
+		}),
+		routes.redirect('/links', 'https://linktr.ee/remotion', {
+			permanent: false,
+		}),
+		routes.redirect(
+			'/contributing',
+			'https://www.remotion.dev/docs/contributing',
+			{permanent: false},
+		),
+		routes.redirect('/resources', 'https://www.remotion.dev/docs/resources', {
+			permanent: false,
+		}),
+		routes.redirect('/rive', 'https://www.remotion.dev/docs/rive', {
+			permanent: false,
+		}),
+		routes.redirect('/zod-types', 'https://www.remotion.dev/docs/zod-types', {
+			permanent: false,
+		}),
+		routes.redirect('/cloudrun', 'https://www.remotion.dev/docs/cloudrun', {
+			permanent: false,
+		}),
+		routes.redirect(
+			'/layout-utils',
+			'https://www.remotion.dev/docs/layout-utils',
+			{permanent: false},
+		),
+		routes.redirect(
+			'/animation-utils',
+			'https://www.remotion.dev/docs/animation-utils',
+			{permanent: false},
+		),
+		routes.redirect('/get-help', 'https://www.remotion.dev/docs/get-help', {
+			permanent: false,
+		}),
+		routes.redirect('/help', 'https://www.remotion.dev/docs/get-help', {
+			permanent: false,
+		}),
+		routes.redirect(
+			'/ask-in-public',
+			'https://www.remotion.dev/docs/ask-in-public',
+			{permanent: false},
+		),
+		routes.redirect('/native', 'https://remotion.dev/docs/react-native', {
+			permanent: false,
+		}),
+		routes.redirect(
+			'/docs/parametrized-rendering',
+			'https://www.remotion.dev/docs/parameterized-rendering',
+			{permanent: false},
+		),
+		routes.redirect(
+			'/business',
+			'https://github.com/orgs/remotion-dev/projects/10',
+			{permanent: false},
+		),
+		routes.redirect(
+			'/docs/thorium-browser',
+			'/docs/miscellaneous/thorium-browser',
+			{permanent: false},
+		),
+		routes.redirect('/youtube', 'https://youtube.com/@remotion_dev', {
+			permanent: false,
+		}),
+		routes.redirect('/bun', '/docs/bun', {permanent: false}),
+		routes.redirect('/transitions', '/docs/transitioning', {
+			permanent: false,
+		}),
+		routes.redirect('/effects', '/docs/effects', {permanent: false}),
+		routes.redirect('/color-correction', '/docs/color-correction', {
+			permanent: false,
+		}),
+		routes.redirect('/design-systems', '/docs/design-systems', {
+			permanent: false,
+		}),
+		routes.redirect('/skills', '/docs/agents/skills', {permanent: false}),
+		routes.redirect('/plugins', '/docs/agents/plugins', {permanent: false}),
+		routes.redirect(
+			'/codex',
+			'https://chatgpt.com/plugins/plugins~Plugin_efd07789186881918253a50acfc32762?open_in_codex',
+			{permanent: false},
+		),
+		routes.redirect(
+			'/repro',
+			'https://stackblitz.com/fork/github/remotion-dev/template-helloworld',
+			{permanent: false},
+		),
+		routes.redirect('/templates/remix', '/templates/react-router', {
+			permanent: false,
+		}),
+		routes.redirect('/studio', '/docs/studio', {permanent: false}),
+		routes.redirect('/legal', '/docs/legal', {permanent: false}),
+		routes.redirect('/security', '/docs/security', {permanent: false}),
+		routes.redirect('/accessibility', '/docs/accessibility', {
+			permanent: false,
+		}),
+		routes.redirect('/custom-controls', '/docs/player/custom-controls', {
+			permanent: false,
+		}),
+		routes.redirect('/drag-and-drop', '/docs/player/drag-and-drop/', {
+			permanent: false,
+		}),
+		routes.redirect('/standalone', '/docs/standalone', {permanent: false}),
+		routes.redirect('/docs/deploy-studio', '/docs/studio/deploy-server', {
+			permanent: false,
+		}),
+		routes.redirect('/blog/faster-lambda-renders', '/blog/faster-lambda', {
+			permanent: false,
+		}),
+		routes.redirect(
+			'/docs/miscellaneous/thorium-browser',
+			'/docs/miscellaneous/chrome-headless-shell',
+			{permanent: false},
+		),
+		routes.redirect(
+			'/chrome-headless-shell',
+			'/docs/miscellaneous/chrome-headless-shell',
+			{permanent: false},
+		),
+		routes.redirect(
+			'/chrome-for-testing',
+			'/docs/miscellaneous/chrome-headless-shell#using-chrome-for-testing-instead',
+			{permanent: false},
+		),
+		routes.redirect('/media-parser', '/docs/media-parser', {
+			permanent: false,
+		}),
+		routes.redirect('/editor-starter', '/docs/editor-starter', {
+			permanent: false,
+		}),
+		routes.redirect('/docs/system-prompt', '/system-prompt.txt', {
+			permanent: false,
+		}),
+		routes.redirect('/docs/ai/system-prompt', '/system-prompt.txt', {
+			permanent: false,
+		}),
+		routes.redirect('/media-parser/', '/docs/media-parser', {
+			permanent: false,
+		}),
+		routes.redirect(
+			'/docs/chrome-headless-shell',
+			'/docs/miscellaneous/chrome-headless-shell',
+			{permanent: false},
+		),
+		routes.redirect('/docs/audio-visualization', '/docs/audio/visualization', {
+			permanent: false,
+		}),
+		routes.redirect('/recorder', '/docs/recorder', {permanent: false}),
+		routes.redirect('/sdk', '/docs/sdk', {permanent: false}),
+		routes.redirect('/canvas-capture', '/docs/canvas-capture', {
+			permanent: false,
+		}),
+		routes.redirect('/install-whisper-cpp', '/docs/install-whisper-cpp', {
+			permanent: false,
+		}),
+		routes.redirect('/captions', '/docs/captions', {permanent: false}),
+		routes.redirect('/docs/animated-captions', '/elements/captions/', {
+			permanent: true,
+		}),
+		routes.redirect('/docs/animated-captions/faq', '/elements/captions/', {
+			permanent: true,
+		}),
+		routes.redirect(
+			'/elements/text/news-article-headline-highlight',
+			'/elements/text/news-article-highlight',
+			{permanent: true},
+		),
+		routes.redirect(
+			'/docs/miscellaneous/snippets/adding-animations',
+			'/docs/animation-math',
+			{permanent: false},
+		),
+		routes.redirect('/docs/video-vs-offthreadvideo', '/docs/video-tags', {
+			permanent: false,
+		}),
+		routes.redirect(
+			'/bbb.webm',
+			'https://upload.wikimedia.org/wikipedia/commons/transcoded/c/c0/Big_Buck_Bunny_4K.webm/Big_Buck_Bunny_4K.webm.720p.vp9.webm',
+			{permanent: false},
+		),
+		routes.redirect('/bbb.mp4', 'https://remotion.media/BigBuckBunny.mp4', {
+			permanent: false,
+		}),
+		routes.redirect(
+			'/leads',
+			'https://github.com/orgs/remotion-dev/projects/15/views/1',
+			{permanent: false},
+		),
+		routes.redirect(
+			'/discord-blue-badges',
+			'https://github.com/remotion-dev/business/issues/347',
+			{permanent: false},
+		),
+		routes.redirect(
+			'/content',
+			'https://github.com/orgs/remotion-dev/projects/16/views/1?layout=board',
+			{permanent: false},
+		),
+		routes.redirect('/docs/snippets/fps-converter', '/docs/multiple-fps', {
+			permanent: false,
+		}),
+		routes.redirect('/docs/miscellaneous/vercel-functions', '/docs/vercel', {
+			permanent: false,
+		}),
+		routes.redirect('/docs/miscellaneous/vercel', '/docs/vercel', {
+			permanent: false,
+		}),
+		routes.redirect('/system-prompt', '/system-prompt.txt', {
+			permanent: false,
+		}),
+		routes.redirect('/investors', '/docs/investors', {permanent: false}),
+		routes.redirect(
+			'/docs/miscellaneous/snippets/offthread-video-while-rendering',
+			'/docs/video-tags#using-a-different-tag-in-preview-and-rendering',
+			{permanent: false},
+		),
+		routes.redirect('/docs/video', '/docs/html5-video', {permanent: false}),
+		routes.redirect('/docs/audio', '/docs/html5-audio', {permanent: false}),
+		routes.redirect('/docs/studio/code-edits', '/docs/studio/interactivity', {
+			permanent: true,
+		}),
+		routes.redirect('/terms', '/docs/terms', {permanent: true}),
+		routes.redirect('/terms.pdf', '/docs/terms.pdf', {permanent: true}),
+		routes.redirect('/privacy', '/docs/privacy', {permanent: true}),
+		routes.redirect('/privacy.pdf', '/docs/privacy.pdf', {permanent: true}),
+		routes.redirect('/terms-4-0', '/docs/terms-4-0', {permanent: true}),
+		routes.redirect('/terms-4-0.md', '/docs/terms-4-0.md', {permanent: true}),
+		routes.redirect('/privacy-4-0', '/docs/privacy-4-0', {permanent: true}),
+		routes.redirect('/privacy-4-0.md', '/docs/privacy-4-0.md', {
+			permanent: true,
+		}),
+		routes.redirect('/telemetry', '/docs/telemetry', {permanent: true}),
+		routes.redirect('/dpa', '/docs/dpa', {permanent: true}),
+		routes.redirect('/dpa.pdf', '/docs/dpa.pdf', {permanent: true}),
+		routes.redirect('/dpia', '/docs/dpia', {permanent: true}),
+		routes.redirect('/dpia.pdf', '/docs/dpia.pdf', {permanent: true}),
+		routes.redirect('/docs/license/terms', '/docs/terms', {permanent: true}),
+		routes.redirect('/docs/license/privacy', '/docs/privacy', {
+			permanent: true,
+		}),
+		routes.redirect('/docs/license/telemetry', '/docs/telemetry', {
+			permanent: true,
+		}),
+		routes.redirect(
+			'/docs/client-side-rendering/telemetry',
+			'/docs/telemetry',
+			{
+				permanent: true,
+			},
+		),
+		routes.redirect('/docs/license/dpa', '/docs/dpa', {permanent: true}),
+		routes.redirect('/docs/license/dpia', '/docs/dpia', {permanent: true}),
+		routes.redirect(
+			'/docs/license/accessibility-statement-remotion-dev',
+			'/docs/accessibility/dev',
+			{permanent: true},
+		),
+		routes.redirect(
+			'/docs/license/accessibility-statement-remotion-pro',
+			'/docs/accessibility/dev',
+			{permanent: true},
+		),
+		routes.redirect('/docs/accessibility/pro', '/docs/accessibility/dev', {
+			permanent: true,
+		}),
+		routes.redirect(
+			'/docs/accessibility/pro.md',
+			'/docs/accessibility/dev.md',
+			{permanent: true},
+		),
+	],
+};
+
+const {headers, redirects, rewrites, ...deploymentConfig} = siteConfig;
+const transformed = getTransformedRoutes({headers, redirects, rewrites});
+if (transformed.error) {
+	throw new Error(transformed.error.message);
+}
+
+export const config = {
+	// Vercel extracts these commands before evaluating this file; keep them literal
+	// and the dashboard Install Command in sync. Avoid its preinstalled Bun.
+	installCommand:
+		'bash -eo pipefail -c \'export BUN_INSTALL="$HOME/.bun-remotion-1.4.3"; test -x "$BUN_INSTALL/bin/bun" || curl -fsSL https://bun.com/install | bash -s bun-v1.4.3; ln -sf bun "$BUN_INSTALL/bin/bunx"; export PATH="$BUN_INSTALL/bin:$PATH"; bun install\'',
+	buildCommand:
+		'cd .. && PATH="$HOME/.bun-remotion-1.4.3/bin:$PATH" timeout 20m "$HOME/.bun-remotion-1.4.3/bin/bunx" turbo run build-docs --filter=docs --no-update-notifier --concurrency=2',
+	...deploymentConfig,
+	routes: transformed.routes?.map((route) =>
+		'dest' in route && route.dest?.startsWith(accountOrigin)
+			? {
+					...route,
+					transforms: [
+						{
+							type: 'request.headers',
+							op: 'set',
+							target: {key: 'x-remotion-public-origin'},
+							args: 'https://www.remotion.dev',
+						},
+					],
+				}
+			: route,
+	),
+};

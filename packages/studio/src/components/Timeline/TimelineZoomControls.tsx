@@ -1,0 +1,212 @@
+import React, {useCallback, useContext, useEffect} from 'react';
+import {Internals} from 'remotion';
+import {BLACK, LIGHT_TEXT} from '../../helpers/colors';
+import {
+	getTimelineMinZoom,
+	getTimelineZoom,
+	sliderValueToTimelineZoom,
+	TIMELINE_ZOOM_SLIDER_PROPS,
+	timelineZoomToSliderValue,
+} from '../../helpers/get-timeline-max-zoom';
+import {useIsVideoComposition} from '../../helpers/is-current-selected-still';
+import {CanvasZoomIcon, CanvasZoomOutIcon} from '../../icons/canvas-zoom';
+import {
+	TimelineZoomCtx,
+	TimelineZoomImperativeContext,
+} from '../../state/timeline-zoom';
+import {useZIndex} from '../../state/z-index';
+import {ActionTooltip} from '../ActionTooltip';
+import {InlineAction} from '../InlineAction';
+import {Spacing} from '../layout';
+import {TimelineViewportWidthContext} from './TimelineWidthProvider';
+
+const TIMELINE_ZOOM_BUTTON_FACTOR = 1.2;
+const timelineZoomKeys = [
+	'ArrowLeft',
+	'ArrowRight',
+	'ArrowUp',
+	'ArrowDown',
+	'PageUp',
+	'PageDown',
+	'Home',
+	'End',
+];
+
+const container: React.CSSProperties = {
+	color: BLACK,
+	flexDirection: 'row',
+	display: 'flex',
+	alignItems: 'center',
+};
+
+const buttonStyle: React.CSSProperties = {
+	fontSize: 24,
+};
+
+const TimelineZoomSlider: React.FC<{
+	readonly maxWidth?: number;
+	readonly minZoom: number;
+	readonly timelineViewportWidth: number;
+}> = ({maxWidth, minZoom, timelineViewportWidth}) => {
+	const {setZoom, zoom: zoomMap} = useContext(TimelineZoomCtx);
+	const {beginZoom, endZoom} = useContext(TimelineZoomImperativeContext);
+	useEffect(() => endZoom, [endZoom]);
+	const videoConfig = Internals.useUnsafeVideoConfig();
+	const {tabIndex} = useZIndex();
+	const isVideoComposition = useIsVideoComposition();
+
+	const onChange: React.ChangeEventHandler<HTMLInputElement> = useCallback(
+		(e) => {
+			if (videoConfig === null) {
+				return;
+			}
+
+			setZoom(
+				videoConfig.id,
+				() =>
+					sliderValueToTimelineZoom({
+						sliderValue: Number(e.target.value),
+						minZoom,
+					}),
+				{
+					anchorFrame: null,
+					anchorContentX: null,
+					anchorViewportX: null,
+				},
+			);
+		},
+		[minZoom, setZoom, videoConfig],
+	);
+
+	if (!isVideoComposition || videoConfig === null) {
+		return null;
+	}
+
+	const zoom = getTimelineZoom({
+		durationInFrames: videoConfig?.durationInFrames ?? 1,
+		timelineViewportWidth,
+		zoom: zoomMap[videoConfig.id] ?? null,
+	});
+	const roundedZoom = Math.round(zoom * 100) / 100;
+
+	return (
+		<input
+			style={maxWidth === undefined ? undefined : {maxWidth}}
+			aria-label={`Timeline zoom (${roundedZoom}px/frame)`}
+			alt={`Timeline zoom (${roundedZoom}px/frame)`}
+			type="range"
+			min={TIMELINE_ZOOM_SLIDER_PROPS.min}
+			max={TIMELINE_ZOOM_SLIDER_PROPS.max}
+			step={TIMELINE_ZOOM_SLIDER_PROPS.step}
+			value={timelineZoomToSliderValue({zoom, minZoom})}
+			onChange={onChange}
+			onPointerDown={(event) => {
+				if (event.button !== 0) {
+					return;
+				}
+
+				event.currentTarget.setPointerCapture(event.pointerId);
+				beginZoom();
+			}}
+			onPointerUp={endZoom}
+			onPointerCancel={endZoom}
+			onLostPointerCapture={endZoom}
+			onBlur={endZoom}
+			onKeyDown={(event) => {
+				if (timelineZoomKeys.includes(event.key)) {
+					beginZoom();
+				}
+			}}
+			onKeyUp={(event) => {
+				if (timelineZoomKeys.includes(event.key)) {
+					endZoom();
+				}
+			}}
+			className="__remotion-timeline-slider"
+			tabIndex={tabIndex}
+		/>
+	);
+};
+
+const TimelineZoomControlsInner: React.FC<{
+	readonly sliderMaxWidth?: number;
+}> = ({sliderMaxWidth}) => {
+	const {setZoom} = useContext(TimelineZoomImperativeContext);
+	const videoConfig = Internals.useUnsafeVideoConfig();
+	const timelineViewportWidth = useContext(TimelineViewportWidthContext) ?? 0;
+	const minZoom = getTimelineMinZoom({
+		durationInFrames: videoConfig?.durationInFrames ?? 1,
+		timelineViewportWidth,
+	});
+
+	const onMinusClicked = useCallback(() => {
+		if (videoConfig === null) {
+			return;
+		}
+
+		setZoom(videoConfig.id, (z) => z / TIMELINE_ZOOM_BUTTON_FACTOR, {
+			anchorFrame: null,
+			anchorContentX: null,
+			anchorViewportX: null,
+		});
+	}, [setZoom, videoConfig]);
+
+	const onPlusClicked = useCallback(() => {
+		if (videoConfig === null) {
+			return;
+		}
+
+		setZoom(videoConfig.id, (z) => z * TIMELINE_ZOOM_BUTTON_FACTOR, {
+			anchorFrame: null,
+			anchorContentX: null,
+			anchorViewportX: null,
+		});
+	}, [setZoom, videoConfig]);
+
+	const isVideoComposition = useIsVideoComposition();
+
+	if (!isVideoComposition || videoConfig === null) {
+		return null;
+	}
+
+	return (
+		<div style={container}>
+			<ActionTooltip
+				label="Zoom out"
+				shortcut={null}
+				delay={800}
+				dismissOnClick
+			>
+				<InlineAction
+					onClick={onMinusClicked}
+					style={buttonStyle}
+					aria-label="Zoom out timeline"
+					type="button"
+					variant={null}
+					unhoveredColor={LIGHT_TEXT}
+					renderAction={(color) => <CanvasZoomOutIcon color={color} />}
+				/>
+			</ActionTooltip>
+			<Spacing x={0.5} />
+			<TimelineZoomSlider
+				maxWidth={sliderMaxWidth}
+				minZoom={minZoom}
+				timelineViewportWidth={timelineViewportWidth}
+			/>
+			<Spacing x={0.5} />
+			<ActionTooltip label="Zoom in" shortcut={null} delay={800} dismissOnClick>
+				<InlineAction
+					onClick={onPlusClicked}
+					style={buttonStyle}
+					aria-label="Zoom in timeline"
+					type="button"
+					variant={null}
+					unhoveredColor={LIGHT_TEXT}
+					renderAction={(color) => <CanvasZoomIcon color={color} />}
+				/>
+			</ActionTooltip>
+		</div>
+	);
+};
+
+export const TimelineZoomControls = React.memo(TimelineZoomControlsInner);

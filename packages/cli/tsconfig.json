@@ -1,0 +1,26 @@
+{
+	"extends": "../tsconfig.settings.json",
+	"compilerOptions": {
+		"rootDir": "src",
+		"outDir": "dist",
+		"jsx": "react-jsx",
+		"skipLibCheck": true,
+		"strict": true,
+		"noUncheckedIndexedAccess": true,
+		"lib": ["dom"]
+	},
+	"references": [
+		{"path": "../core"},
+		{"path": "../bundler"},
+		{"path": "../codemods"},
+		{"path": "../licensing"},
+		{"path": "../renderer"},
+		{"path": "../player"},
+		{"path": "../media-utils"},
+		{"path": "../studio-server"},
+		{"path": "../studio-protocol"},
+		{"path": "../whisper-webgpu"},
+		{"path": "../zod-types"}
+	],
+	"exclude": ["dist"]
+}

@@ -1,0 +1,27 @@
+---
+image: https://remotion.media/docs/generated/articles-docs-troubleshooting-rosetta.png
+id: rosetta
+sidebar_label: Apple Silicon detected
+title: Apple Silicon under Rosetta
+crumb: "Troubleshooting"
+---
+
+Running Remotion on Apple Silicon under Rosetta can be up to 2x slower.
+
+The recommended way to run Remotion on Apple Silicon is using Node with the native arm64 architecture.  
+If you installed Node with `arch -x86_64`, it runs under Rosetta.
+
+## Solution
+
+Install Node and run it natively.
+
+For example, installing Node natively using nvm:
+
+```
+arch -arm64 zsh
+nvm install --lts
+```
+
+You can check the architecture of your shell by typing in a terminal `arch`.  
+You can check the Node architecture by running in a terminal `node -p process.arch`.  
+If both of these print out `arm64` you are good to go.

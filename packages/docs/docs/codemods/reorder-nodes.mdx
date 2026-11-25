@@ -1,0 +1,113 @@
+---
+image: https://remotion.media/docs/generated/articles-docs-codemods-reorder-nodes.png
+title: 'reorderNodes()'
+crumb: '@remotion/codemods'
+---
+
+# reorderNodes()<AvailableFrom v="4.0.533" />
+
+Moves one or more nodes as a group before or after a sibling, or inside a Track. The moved nodes keep their source order. For ordinary `<Sequence>` siblings, this changes stacking order. For `<Series.Sequence>` and `<TransitionSeries.Sequence>` siblings, it also changes their calculated timing.
+
+:::warning
+
+_Draft API_: This API is experimental and may change.
+
+:::
+
+```ts twoslash title="reorder-nodes.ts"
+import {reorderNodes, type CodemodProject, type NodeReference} from '@remotion/codemods';
+
+declare const project: CodemodProject;
+declare const first: NodeReference;
+declare const second: NodeReference;
+declare const target: NodeReference;
+
+const result = reorderNodes({
+  project,
+  nodes: [first, second],
+  target,
+  position: 'before',
+});
+
+console.log(result.changes);
+```
+
+For before/after moves, all moved nodes and the target must be direct JSX siblings in the same file. A target in the moved group is invalid. The edit is atomic, so an invalid node leaves the input project unchanged.
+
+From v4.0.544, this function returns its result synchronously and throws errors immediately.
+
+## Options
+
+### project
+
+An in-memory [`CodemodProject`](/docs/codemods#project-model). The input project is not mutated.
+
+### nodes
+
+A nonempty array of [`NodeReference`](/docs/codemods#node-references) values for the nodes to move. Their array order does not affect the result.
+
+### target
+
+The sibling node to position the group relative to, or the destination Track for an inside move.
+
+### position
+
+Either `'before'`, `'after'`, or `'inside'`. From v4.0.544, `'inside'` moves nodes into a Track and wraps each in a Sequence with the supplied timing. The nodes and Track must be in the same file and source scope.
+
+### timings<AvailableFrom v="4.0.544" />
+
+Required when `position` is `'inside'`. One `NodeMoveTiming` object per input node, in input order. The timings stay attached to their nodes when they are sorted into source order.
+
+#### from
+
+A finite, nonnegative start frame relative to the destination Track.
+
+#### durationInFrames
+
+A finite, positive duration.
+
+#### playbackRate
+
+A finite, positive playback rate. Use `1` for normal speed.
+
+#### trimBefore
+
+A finite, nonnegative trim offset. Use `0` for no trim.
+
+#### name
+
+The name for the inserted Sequence wrapper.
+
+## Return value
+
+An object with the following properties.
+
+### changes
+
+An array of `{filePath, previousContents, nextContents}` file changes. This operation changes one file.
+
+### nodePathRemappings
+
+An array of `{filePath, oldNodePath, newNodePath}` mappings. A `null` old path indicates an insertion; a `null` new path indicates removal. Apply these mappings to references from the input project. See [node references](/docs/codemods#node-references).
+
+### updatedNodes
+
+References to the moved nodes in the output project, in the order passed in `nodes`.
+
+### editDetails
+
+The source location and label for the edit.
+
+## Errors
+
+Throws when a reference cannot be resolved, the nodes and target are not direct siblings in the same file, or the nodes are already in the requested position. Failed edits leave the input project unchanged.
+
+## Compatibility
+
+<CompatibilityTable chrome firefox safari nodejs bun serverlessFunctions clientSideRendering serverSideRendering player studio />
+
+## See also
+
+- [Source code for this function](https://github.com/remotion-dev/remotion/blob/main/packages/codemods/src/reorder-nodes.ts)
+- [`@remotion/codemods`](/docs/codemods)
+- [`getNodes()`](/docs/codemods/get-nodes)

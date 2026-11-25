@@ -1,0 +1,93 @@
+---
+image: https://remotion.media/docs/generated/articles-docs-client-side-rendering-html-in-canvas.png
+title: 'HTML-in-canvas'
+crumb: 'Client-side rendering'
+sidebar_label: HTML-in-canvas
+---
+
+# HTML-in-canvas for client-side rendering<AvailableFrom v="4.0.447" />
+
+On supported Chromium-based browsers, [`@remotion/web-renderer`](/docs/web-renderer) can optionally capture full frames using the experimental [HTML-in-canvas](/docs/html-in-canvas) APIs.
+
+Currently, HTML-in-canvas is only available in Chrome.
+
+Enabling the option does not guarantee that HTML-in-canvas client-side rendering is being used.
+If [`HtmlInCanvas.isNestingSupported()`](/docs/remotion/html-in-canvas#htmlincanvasisnestingsupported) returns `false`, it falls back to the [default frame capturing mechanism](/docs/client-side-rendering/how-it-works).
+
+## Enabling
+
+### In code
+
+Pass `allowHtmlInCanvas: true` to [`renderMediaOnWeb()`](/docs/web-renderer/render-media-on-web) or [`renderStillOnWeb()`](/docs/web-renderer/render-still-on-web).  
+The default is `false` when you omit the field.
+
+```tsx twoslash title="Example"
+import {renderStillOnWeb} from '@remotion/web-renderer';
+
+declare const composition: Parameters<typeof renderStillOnWeb>[0]['composition'];
+
+// ---cut---
+await renderStillOnWeb({
+  composition,
+  frame: 0,
+  inputProps: {},
+  allowHtmlInCanvas: true,
+});
+```
+
+### In the Studio
+
+Open the render modal, go to the `Advanced` tab, and turn on `Allow HTML-in-canvas`.  
+The initial value comes from your config and CLI defaults.
+
+### As the Studio default
+
+```ts twoslash title="remotion.config.ts"
+import {Config} from '@remotion/cli/config';
+// ---cut---
+Config.setAllowHtmlInCanvasEnabled(true);
+```
+
+Or start Studio with `--allow-html-in-canvas`.  
+See [`setAllowHtmlInCanvasEnabled()`](/docs/config#setallowhtmlincanvasenabled) and [`npx remotion studio`](/docs/cli/studio#--allow-html-in-canvas).
+
+## Check if HTML-in-canvas was used
+
+If HTML-in-canvas was used, you will see a warning in the browser console. With [`renderMediaOnWeb()`](/docs/web-renderer/render-media-on-web):
+
+```
+Using Chromium experimental HTML-in-canvas (drawElementImage) for video frames. Pixels may differ from the built-in DOM composer. Set allowHtmlInCanvas: false to force software rasterization. See https://remotion.dev/docs/client-side-rendering/html-in-canvas
+```
+
+With [`renderStillOnWeb()`](/docs/web-renderer/render-still-on-web), the warning says `for this frame` instead of `for video frames`.
+
+If native capture starts but fails while capturing a frame, a warning is printed and the renderer falls back to the built-in DOM composer:
+
+```
+Not using HTML-in-canvas: drawElementImage failed (...); falling back to the built-in DOM composer.
+```
+
+If HTML-in-canvas is unavailable, disabled, or would require a nested capture in a browser without nesting support, the built-in DOM composer is selected.
+
+## Compatibility
+
+<CompatibilityTable
+  chrome
+  firefox={false}
+  safari={false}
+  nodejs={''}
+  bun={''}
+  serverlessFunctions=""
+  clientSideRendering
+  serverSideRendering={false}
+  player={false}
+  studio
+  hideServers
+/>
+
+## See also
+
+- [`<HtmlInCanvas>`](/docs/remotion/html-in-canvas)
+- [How client-side rendering works](/docs/client-side-rendering/how-it-works)
+- [`renderMediaOnWeb()`](/docs/web-renderer/render-media-on-web)
+- [`renderStillOnWeb()`](/docs/web-renderer/render-still-on-web)

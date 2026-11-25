@@ -1,0 +1,77 @@
+---
+image: https://remotion.media/docs/generated/articles-docs-videos-jumpcuts.png
+title: 'Jump Cutting'
+sidebar_label: Jump Cuts
+crumb: 'Snippets'
+---
+
+Sometimes you want to implement a "jump cut" to skip parts of a video (for example to cut out the "uhm"s).
+
+## Best practice: Pre-mounting multiple video tags
+
+The recommended approach for smooth jump-cut playback in the browser is to render a separate [`<Video>` from `@remotion/media`](/docs/media/video) tag for each section using [`<Series>`](/docs/series). The Studio [premounts](/docs/player/premounting) each segment for 2 seconds by default, giving the browser time to preload it before it starts playing. In the [Player](/docs/player), pass [`defaultPremountInSeconds`](/docs/player/player#defaultpremountinseconds) to enable premounting.
+
+```tsx twoslash title="JumpCuts.tsx"
+import {Video} from '@remotion/media';
+import React from 'react';
+import {CalculateMetadataFunction, Series, staticFile} from 'remotion';
+
+const fps = 30;
+
+type Section = {
+  trimBefore: number;
+  durationInFrames: number;
+};
+
+export const SAMPLE_SECTIONS: Section[] = [
+  {trimBefore: 0, durationInFrames: 5 * fps},
+  {trimBefore: 7 * fps, durationInFrames: 3 * fps},
+  {trimBefore: 13 * fps, durationInFrames: 5 * fps},
+];
+
+type Props = {
+  sections: Section[];
+};
+
+export const calculateMetadata: CalculateMetadataFunction<Props> = ({props}) => {
+  const durationInFrames = props.sections.reduce((acc, section) => {
+    return acc + section.durationInFrames;
+  }, 0);
+
+  return {
+    fps,
+    durationInFrames,
+  };
+};
+
+export const JumpCuts: React.FC<Props> = ({sections}) => {
+  return (
+    <Series>
+      {sections.map((section, i) => (
+        <Series.Sequence
+          key={i}
+          durationInFrames={section.durationInFrames}
+        >
+          <Video
+            trimBefore={section.trimBefore}
+            durationInFrames={section.durationInFrames}
+            src={staticFile('time.mp4')}
+          />
+        </Series.Sequence>
+      ))}
+    </Series>
+  );
+};
+```
+
+:::note
+These considerations apply only to smooth previews in the browser.  
+During rendering, video frames are selected exactly, so premounting is only needed for smoother browser preview playback.
+:::
+
+## See also
+
+- [Playing videos in sequence](/docs/videos/sequence)
+- [Premounting](/docs/player/premounting)
+- [Different segments at different speeds](/docs/videos/different-segments-at-different-speeds)
+- [Change the speed of a video over time](/docs/videos/accelerated-video)

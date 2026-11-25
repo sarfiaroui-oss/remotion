@@ -1,0 +1,15 @@
+{
+	"extends": "../tsconfig.settings.json",
+	"compilerOptions": {
+		"rootDir": "src",
+		"types": ["bun", "@webgpu/types"],
+		"outDir": "dist/cjs",
+		"skipLibCheck": true
+	},
+	"include": ["src"],
+	"references": [
+		{
+			"path": "../core"
+		}
+	]
+}

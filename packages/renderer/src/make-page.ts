@@ -1,0 +1,154 @@
+import type {PreferredEffectBackend} from 'remotion';
+import type {_InternalTypes} from 'remotion';
+import type {VideoConfig} from 'remotion/no-react';
+import type {BrowserLog} from './browser-log';
+import type {OnLog, Page} from './browser/BrowserPage';
+import type {SourceMapGetter} from './browser/source-map-getter';
+import type {Codec} from './codec';
+import type {VideoImageFormat} from './image-format';
+import type {LogLevel} from './log-level';
+import {getAvailableMemory} from './memory/get-available-memory';
+import type {PixelFormat} from './pixel-format';
+import {puppeteerEvaluateWithCatch} from './puppeteer-evaluate';
+import type {BrowserReplacer} from './replace-browser';
+import {setPropsAndEnv} from './set-props-and-env';
+
+export const makePage = async ({
+	context,
+	initialFrame,
+	attempt,
+	videoEnabled,
+	browserReplacer,
+	logLevel,
+	indent,
+	pagesArray,
+	onBrowserLog,
+	scale,
+	timeoutInMilliseconds,
+	composition,
+	proxyPort,
+	serveUrl,
+	muted,
+	envVariables,
+	serializedInputPropsWithCustomSchema,
+	serializedResolvedPropsWithCustomSchema,
+	pageIndex,
+	isMainTab,
+	mediaCacheSizeInBytes,
+	preferredEffectBackend,
+	onLog,
+	darkMode,
+	sampleRate,
+}: {
+	context: SourceMapGetter;
+	initialFrame: number;
+	attempt: number;
+	videoEnabled: boolean;
+	browserReplacer: BrowserReplacer;
+	logLevel: LogLevel;
+	indent: boolean;
+	pagesArray: Page[];
+	onBrowserLog: ((log: BrowserLog) => void) | null;
+	scale: number;
+	timeoutInMilliseconds: number;
+	composition: Omit<VideoConfig, 'defaultProps' | 'props'>;
+	proxyPort: number;
+	serveUrl: string;
+	muted: boolean;
+	envVariables: Record<string, string>;
+	serializedInputPropsWithCustomSchema: string;
+	serializedResolvedPropsWithCustomSchema: string;
+	pageIndex: number;
+	isMainTab: boolean;
+	mediaCacheSizeInBytes: number | null;
+	preferredEffectBackend: PreferredEffectBackend;
+	onLog: OnLog;
+	darkMode: boolean;
+	sampleRate: number;
+}) => {
+	const page = await browserReplacer
+		.getBrowser()
+		.newPage({context, logLevel, indent, pageIndex, onBrowserLog, onLog});
+	pagesArray.push(page);
+	await page.setViewport({
+		width: composition.width,
+		height: composition.height,
+		deviceScaleFactor: scale,
+	});
+
+	await setPropsAndEnv({
+		serializedInputPropsWithCustomSchema,
+		envVariables,
+		page,
+		serveUrl,
+		initialFrame,
+		attempt,
+		timeoutInMilliseconds,
+		proxyPort,
+		retriesRemaining: 2,
+		audioEnabled: !muted,
+		videoEnabled,
+		indent,
+		logLevel,
+		onServeUrlVisited: () => undefined,
+		isMainTab,
+		mediaCacheSizeInBytes,
+		preferredEffectBackend,
+		initialMemoryAvailable: getAvailableMemory(logLevel),
+		darkMode,
+		sampleRate,
+	});
+
+	await puppeteerEvaluateWithCatch({
+		// eslint-disable-next-line max-params
+		pageFunction: (
+			id: string,
+			props: string,
+			durationInFrames: number,
+			fps: number,
+			height: number,
+			width: number,
+			defaultCodec: Codec,
+			defaultOutName: string | null,
+			defaultVideoImageFormat: VideoImageFormat | null,
+			defaultPixelFormat: PixelFormat | null,
+			defaultProResProfile: _InternalTypes['ProResProfile'] | null,
+			defaultSampleRate: number | null,
+		) => {
+			window.remotion_setBundleMode({
+				type: 'composition',
+				compositionName: id,
+				serializedResolvedPropsWithSchema: props,
+				compositionDurationInFrames: durationInFrames,
+				compositionFps: fps,
+				compositionHeight: height,
+				compositionWidth: width,
+				compositionDefaultCodec: defaultCodec,
+				compositionDefaultOutName: defaultOutName,
+				compositionDefaultVideoImageFormat: defaultVideoImageFormat,
+				compositionDefaultPixelFormat: defaultPixelFormat,
+				compositionDefaultProResProfile: defaultProResProfile,
+				compositionDefaultSampleRate: defaultSampleRate,
+			});
+		},
+		args: [
+			composition.id,
+			serializedResolvedPropsWithCustomSchema,
+			composition.durationInFrames,
+			composition.fps,
+			composition.height,
+			composition.width,
+			composition.defaultCodec,
+			composition.defaultOutName,
+			composition.defaultVideoImageFormat,
+			composition.defaultPixelFormat,
+			composition.defaultProResProfile,
+			composition.defaultSampleRate,
+		],
+		frame: null,
+		page,
+		timeoutInMilliseconds,
+	});
+
+	return page;
+};

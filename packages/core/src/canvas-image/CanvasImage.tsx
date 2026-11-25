@@ -1,0 +1,712 @@
+import {
+	forwardRef,
+	useContext,
+	useImperativeHandle,
+	useLayoutEffect,
+	useMemo,
+	useReducer,
+	useRef,
+	useState,
+} from 'react';
+import {calculateImageFit} from '../calculate-image-fit.js';
+import type {SequenceControls} from '../CompositionManager.js';
+import type {EffectsProp, EffectsOutputSize} from '../effects/effect-types.js';
+import {runEffectChain} from '../effects/run-effect-chain.js';
+import {useEffectChainState} from '../effects/use-effect-chain-state.js';
+import {
+	useMemoizedEffectDefinitions,
+	useMemoizedEffects,
+} from '../effects/use-memoized-effects.js';
+import {addSequenceStackTraces} from '../enable-sequence-stack-traces.js';
+import {Freeze} from '../freeze.js';
+import {
+	backgroundSchema,
+	baseSchemaWithoutPlaybackRate,
+	borderRadiusSchema,
+	borderSchema,
+	cropSchema,
+	transformSchema,
+	type InteractivitySchema,
+} from '../interactivity-schema.js';
+import {usePreload} from '../prefetch.js';
+import {resolveSequenceDuration} from '../resolve-sequence-duration.js';
+import {SequenceContent} from '../sequence-activity-context.js';
+import {Sequence} from '../Sequence.js';
+import {SequenceContext} from '../SequenceContext.js';
+import {truncateSrcForLabel} from '../truncate-src-for-label.js';
+import {useBufferState} from '../use-buffer-state.js';
+import {useCropStyle} from '../use-crop-style.js';
+import {useDelayRender} from '../use-delay-render.js';
+import {useVideoEnabled} from '../use-media-enabled.js';
+import {usePremounting} from '../use-premounting.js';
+import {useReleaseCanvas} from '../use-release-canvas.js';
+import {withInteractivitySchema} from '../with-interactivity-schema.js';
+import type {LoadedImage} from './canvas-image-load-state.js';
+import {canvasImageLoadReducer} from './canvas-image-load-state.js';
+import type {CanvasImageCanvasProps, CanvasImageProps} from './props.js';
+
+export const canvasImageSchema = {
+	src: {
+		type: 'asset',
+		assetType: 'image',
+		default: undefined,
+		description: 'Source',
+		keyframable: false,
+	},
+	...baseSchemaWithoutPlaybackRate,
+	...cropSchema,
+	fit: {
+		type: 'enum',
+		default: 'fill',
+		description: 'Fit',
+		variants: {
+			fill: {},
+			contain: {},
+			cover: {},
+		},
+	},
+	...transformSchema,
+	...backgroundSchema,
+	...borderSchema,
+	...borderRadiusSchema,
+} as const satisfies InteractivitySchema;
+
+const releaseLoadDelay = (
+	pendingLoadHandleRef: React.MutableRefObject<number | null>,
+	continueRender: ReturnType<typeof useDelayRender>['continueRender'],
+) => {
+	const handle = pendingLoadHandleRef.current;
+	if (handle === null) {
+		return;
+	}
+
+	pendingLoadHandleRef.current = null;
+	continueRender(handle);
+};
+
+const setCanvasRef = (
+	setOutputCanvas: React.Dispatch<
+		React.SetStateAction<HTMLCanvasElement | null>
+	>,
+	ref: React.ForwardedRef<HTMLCanvasElement>,
+	canvas: HTMLCanvasElement | null,
+) => {
+	setOutputCanvas(canvas);
+
+	if (typeof ref === 'function') {
+		ref(canvas);
+	} else if (ref) {
+		ref.current = canvas;
+	}
+};
+
+const makeAbortError = () => {
+	if (typeof DOMException !== 'undefined') {
+		return new DOMException('Image loading was aborted', 'AbortError');
+	}
+
+	const error = new Error('Image loading was aborted');
+	error.name = 'AbortError';
+	return error;
+};
+
+const loadImage = ({
+	src,
+	signal,
+	crossOrigin,
+}: {
+	readonly src: string;
+	readonly signal: AbortSignal;
+	readonly crossOrigin: CanvasImageProps['crossOrigin'];
+}): Promise<LoadedImage> => {
+	return new Promise((resolve, reject) => {
+		const image = new Image();
+		let settled = false;
+
+		function cleanup() {
+			image.onload = null;
+			image.onerror = null;
+		}
+
+		function settle(callback: () => void) {
+			if (settled) {
+				return;
+			}
+
+			settled = true;
+			cleanup();
+			callback();
+		}
+
+		function onAbort() {
+			settle(() => reject(makeAbortError()));
+		}
+
+		image.onload = () => {
+			Promise.resolve(image.decode?.())
+				.catch(() => undefined)
+				.then(() => {
+					const imageWidth = image.naturalWidth || image.width;
+					const imageHeight = image.naturalHeight || image.height;
+					if (imageWidth <= 0 || imageHeight <= 0) {
+						settle(() =>
+							reject(
+								new Error(
+									`Could not determine dimensions for <CanvasImage> with src="${truncateSrcForLabel(
+										src,
+									)}"`,
+								),
+							),
+						);
+						return;
+					}
+
+					settle(() =>
+						resolve({element: image, width: imageWidth, height: imageHeight}),
+					);
+				});
+		};
+
+		image.onerror = () => {
+			settle(() =>
+				reject(
+					new Error(
+						`Could not load <CanvasImage> with src="${truncateSrcForLabel(src)}"`,
+					),
+				),
+			);
+		};
+
+		signal.addEventListener('abort', onAbort, {once: true});
+		if (signal.aborted) {
+			onAbort();
+			return;
+		}
+
+		image.crossOrigin = crossOrigin || 'anonymous';
+		image.src = src;
+	});
+};
+
+function exponentialBackoff(errorCount: number): number {
+	return 1000 * 2 ** (errorCount - 1);
+}
+
+const waitForNextFrame = ({
+	onFrame,
+}: {
+	readonly onFrame: () => void;
+}): (() => void) => {
+	if (typeof requestAnimationFrame === 'undefined') {
+		onFrame();
+		return () => undefined;
+	}
+
+	const frame = requestAnimationFrame(onFrame);
+	return () => cancelAnimationFrame(frame);
+};
+
+type CanvasImageContentProps = Pick<
+	CanvasImageProps,
+	| 'className'
+	| 'crossOrigin'
+	| 'delayRenderRetries'
+	| 'delayRenderTimeoutInMilliseconds'
+	| 'fit'
+	| 'height'
+	| 'id'
+	| 'maxRetries'
+	| 'onError'
+	| 'pauseWhenLoading'
+	| 'src'
+	| 'style'
+	| 'width'
+> & {
+	readonly effects: EffectsProp;
+	readonly effectsOutputSize: EffectsOutputSize | null;
+	readonly controls: SequenceControls | undefined;
+} & CanvasImageCanvasProps;
+
+const CanvasImageContent = forwardRef<
+	HTMLCanvasElement,
+	CanvasImageContentProps
+>(
+	(
+		{
+			src,
+			crossOrigin,
+			width,
+			height,
+			fit = 'fill',
+			effects,
+			effectsOutputSize,
+			controls,
+			onError,
+			className,
+			style,
+			id,
+			pauseWhenLoading,
+			maxRetries = 2,
+			delayRenderRetries,
+			delayRenderTimeoutInMilliseconds,
+			...canvasProps
+		},
+		ref,
+	) => {
+		const {delayRender, continueRender, cancelRender} = useDelayRender();
+		const {delayPlayback} = useBufferState();
+		const [outputCanvas, setOutputCanvas] = useState<HTMLCanvasElement | null>(
+			null,
+		);
+		const [loadState, dispatchLoad] = useReducer(canvasImageLoadReducer, {
+			type: 'idle',
+		});
+		const loadedImage: LoadedImage | null =
+			loadState.type === 'applying-effects' || loadState.type === 'ready'
+				? loadState.image
+				: null;
+		const isLoadPending =
+			loadState.type === 'loading' || loadState.type === 'applying-effects';
+		const onErrorRef = useRef(onError);
+		onErrorRef.current = onError;
+		const actualSrc = usePreload(src);
+		const chainState = useEffectChainState(effectsOutputSize);
+		const memoizedEffects = useMemoizedEffects({
+			effects,
+			overrideId: controls?.overrideId ?? null,
+			runtimeValues: controls?.runtimeValues ?? null,
+			videoConfigValues: controls?.videoConfigValues ?? null,
+		});
+		const sequenceContext = useContext(SequenceContext);
+		const pendingLoadHandleRef = useRef<number | null>(null);
+		const isPremounting = Boolean(sequenceContext?.premounting);
+		const isPostmounting = Boolean(sequenceContext?.postmounting);
+
+		// Bound callbacks keep only these inputs, including after minification.
+		const releasePendingLoadDelay = useMemo(
+			() => releaseLoadDelay.bind(null, pendingLoadHandleRef, continueRender),
+			[continueRender],
+		);
+
+		const sourceCanvas = useMemo(() => {
+			if (typeof document === 'undefined') {
+				return null;
+			}
+
+			return document.createElement('canvas');
+		}, []);
+
+		const canvasRef = useMemo(
+			() => setCanvasRef.bind(null, setOutputCanvas, ref),
+			[ref],
+		);
+		useReleaseCanvas(sourceCanvas);
+		useReleaseCanvas(outputCanvas);
+
+		useLayoutEffect(() => {
+			if (
+				!pauseWhenLoading ||
+				!isLoadPending ||
+				isPremounting ||
+				isPostmounting
+			) {
+				return;
+			}
+
+			return delayPlayback().unblock;
+		}, [
+			delayPlayback,
+			isLoadPending,
+			isPostmounting,
+			isPremounting,
+			pauseWhenLoading,
+		]);
+
+		useLayoutEffect(() => {
+			const handle = delayRender(
+				`Rendering <CanvasImage> with src="${truncateSrcForLabel(actualSrc)}"`,
+				{
+					retries: delayRenderRetries ?? undefined,
+					timeoutInMilliseconds: delayRenderTimeoutInMilliseconds ?? undefined,
+				},
+			);
+
+			const controller = new AbortController();
+			let cancelled = false;
+			let errorCount = 0;
+			let timeoutId: ReturnType<typeof setTimeout> | null = null;
+
+			dispatchLoad({type: 'load-started'});
+			pendingLoadHandleRef.current = handle;
+
+			const attemptLoad = () => {
+				loadImage({src: actualSrc, signal: controller.signal, crossOrigin})
+					.then((image) => {
+						if (cancelled) {
+							return;
+						}
+
+						dispatchLoad({type: 'image-decoded', image});
+					})
+					.catch((err) => {
+						if ((err as Error).name === 'AbortError') {
+							return;
+						}
+
+						errorCount++;
+						if (errorCount <= maxRetries) {
+							const backoff = exponentialBackoff(errorCount);
+							// eslint-disable-next-line no-console
+							console.warn(
+								`Could not load <CanvasImage> with src="${truncateSrcForLabel(actualSrc)}", retrying in ${backoff}ms`,
+							);
+							timeoutId = setTimeout(() => {
+								if (!cancelled) {
+									attemptLoad();
+								}
+							}, backoff);
+						} else if (onErrorRef.current) {
+							onErrorRef.current(err as Error);
+							dispatchLoad({type: 'load-failed'});
+							releasePendingLoadDelay();
+						} else {
+							cancelRender(err);
+						}
+					});
+			};
+
+			attemptLoad();
+
+			return () => {
+				cancelled = true;
+				if (timeoutId !== null) {
+					clearTimeout(timeoutId);
+				}
+
+				controller.abort();
+				releasePendingLoadDelay();
+			};
+		}, [
+			actualSrc,
+			cancelRender,
+			releasePendingLoadDelay,
+			crossOrigin,
+			delayRender,
+			delayRenderRetries,
+			delayRenderTimeoutInMilliseconds,
+			maxRetries,
+		]);
+
+		useLayoutEffect(() => {
+			if (!loadedImage || !outputCanvas || !sourceCanvas) {
+				return;
+			}
+
+			const handle = delayRender(
+				`Applying effects to <CanvasImage> with src="${truncateSrcForLabel(actualSrc)}"`,
+			);
+
+			let cancelled = false;
+			let continued = false;
+			let cancelWaitForNextFrame: () => void = () => undefined;
+
+			const continueRenderOnce = () => {
+				if (continued) {
+					return;
+				}
+
+				continued = true;
+				continueRender(handle);
+			};
+
+			const canvasWidth = width ?? loadedImage.width;
+			const canvasHeight = height ?? loadedImage.height;
+			const sourceContext = sourceCanvas.getContext('2d', {
+				colorSpace: 'srgb',
+			});
+
+			if (!sourceContext) {
+				const error = new Error(
+					'Could not get 2D context for <CanvasImage> source canvas',
+				);
+				try {
+					if (onErrorRef.current) {
+						onErrorRef.current(error);
+						dispatchLoad({type: 'presented'});
+						releasePendingLoadDelay();
+					} else {
+						cancelRender(error);
+					}
+				} finally {
+					continueRenderOnce();
+				}
+
+				return () => {
+					continueRenderOnce();
+				};
+			}
+
+			sourceCanvas.width = canvasWidth;
+			sourceCanvas.height = canvasHeight;
+			outputCanvas.width = canvasWidth;
+			outputCanvas.height = canvasHeight;
+
+			sourceContext.clearRect(0, 0, canvasWidth, canvasHeight);
+			sourceContext.drawImage(
+				loadedImage.element,
+				...calculateImageFit(
+					fit,
+					{width: loadedImage.width, height: loadedImage.height},
+					{width: canvasWidth, height: canvasHeight},
+				),
+			);
+
+			runEffectChain({
+				state: chainState.get(canvasWidth, canvasHeight)!,
+				source: sourceCanvas,
+				effects: memoizedEffects,
+				output: outputCanvas,
+				width: canvasWidth,
+				height: canvasHeight,
+			})
+				.then((completed) => {
+					if (completed && !cancelled) {
+						cancelWaitForNextFrame = waitForNextFrame({
+							onFrame: () => {
+								if (cancelled) {
+									return;
+								}
+
+								continueRenderOnce();
+								dispatchLoad({type: 'presented'});
+								releasePendingLoadDelay();
+							},
+						});
+					}
+				})
+				.catch((err) => {
+					if (cancelled) {
+						return;
+					}
+
+					if (onErrorRef.current) {
+						onErrorRef.current(err as Error);
+						continueRenderOnce();
+						dispatchLoad({type: 'presented'});
+						releasePendingLoadDelay();
+					} else {
+						cancelRender(err);
+					}
+				});
+
+			return () => {
+				cancelled = true;
+				cancelWaitForNextFrame();
+				continueRenderOnce();
+			};
+		}, [
+			actualSrc,
+			cancelRender,
+			chainState,
+			continueRender,
+			releasePendingLoadDelay,
+			delayRender,
+			fit,
+			height,
+			loadedImage,
+			memoizedEffects,
+			outputCanvas,
+			sourceCanvas,
+			width,
+		]);
+
+		return (
+			<canvas
+				{...canvasProps}
+				ref={canvasRef}
+				width={width}
+				height={height}
+				className={className}
+				style={style}
+				id={id}
+			/>
+		);
+	},
+);
+
+CanvasImageContent.displayName = 'CanvasImageContent';
+
+const CanvasImageInner = forwardRef<
+	HTMLCanvasElement,
+	CanvasImageProps & {
+		readonly controls: SequenceControls | undefined;
+	}
+>(
+	(
+		{
+			src,
+			crossOrigin,
+			width,
+			height,
+			fit,
+			effects = [],
+			effectsOutputSize,
+			className,
+			style,
+			id,
+			onError,
+			pauseWhenLoading,
+			maxRetries,
+			delayRenderRetries,
+			delayRenderTimeoutInMilliseconds,
+			durationInFrames,
+			from,
+			trimBefore,
+			loop,
+			freeze,
+			premountFor,
+			postmountFor,
+			styleWhilePremounted,
+			styleWhilePostmounted,
+			hidden,
+			name,
+			showInTimeline,
+			cropLeft,
+			cropRight,
+			cropTop,
+			cropBottom,
+			controls,
+			_remotionInternalDocumentationLink,
+			_remotionInternalCropComponentName,
+			...canvasProps
+		},
+		ref,
+	) => {
+		if (!src) {
+			throw new Error('No "src" prop was passed to <CanvasImage>.');
+		}
+
+		const isMedia = useMemo(
+			() => ({
+				type: 'image' as const,
+				src,
+				animated: null,
+			}),
+			[src],
+		);
+
+		const memoizedEffectDefinitions = useMemoizedEffectDefinitions(effects);
+		const actualRef = useRef<HTMLCanvasElement | null>(null);
+		const videoEnabled = useVideoEnabled();
+		// No canvas is mounted during audio-only frames; it remounts afterwards.
+		useImperativeHandle(ref, () => {
+			return (videoEnabled ? actualRef.current : null) as HTMLCanvasElement;
+		}, [videoEnabled]);
+		const {
+			effectivePostmountFor,
+			effectivePremountFor,
+			freezeFrame,
+			isPremountingOrPostmounting,
+			postmountingActive,
+			premountingActive,
+			premountingStyle,
+		} = usePremounting({
+			from: from ?? 0,
+			durationInFrames: resolveSequenceDuration({
+				durationInFrames,
+				playbackRate: undefined,
+				loop,
+			}),
+			premountFor: premountFor ?? null,
+			postmountFor: postmountFor ?? null,
+			style: style ?? null,
+			styleWhilePremounted: styleWhilePremounted ?? null,
+			styleWhilePostmounted: styleWhilePostmounted ?? null,
+			hideWhilePremounted: 'display-none',
+		});
+		const croppedStyle = useCropStyle({
+			cropLeft,
+			cropRight,
+			cropTop,
+			cropBottom,
+			style: premountingStyle,
+			componentName: _remotionInternalCropComponentName ?? '<CanvasImage />',
+		});
+
+		if (videoEnabled === false) {
+			return null;
+		}
+
+		return (
+			<Freeze
+				frame={freezeFrame}
+				active={isPremountingOrPostmounting}
+				_remotionInternalIsPremounting={premountingActive}
+			>
+				<Sequence
+					layout="none"
+					from={from ?? 0}
+					trimBefore={trimBefore}
+					loop={loop}
+					durationInFrames={durationInFrames}
+					freeze={freeze}
+					hidden={hidden}
+					showInTimeline={showInTimeline ?? true}
+					name={name ?? '<CanvasImage>'}
+					_remotionInternalDocumentationLink={
+						_remotionInternalDocumentationLink ??
+						'https://www.remotion.dev/docs/canvasimage'
+					}
+					controls={controls}
+					_remotionInternalEffects={memoizedEffectDefinitions}
+					_remotionInternalIsMedia={isMedia}
+					_remotionInternalPremountDisplay={effectivePremountFor || null}
+					_remotionInternalPostmountDisplay={effectivePostmountFor || null}
+					_remotionInternalIsPremounting={premountingActive}
+					_remotionInternalIsPostmounting={postmountingActive}
+				>
+					<SequenceContent>
+						<CanvasImageContent
+							ref={actualRef}
+							src={src}
+							crossOrigin={crossOrigin}
+							width={width}
+							height={height}
+							fit={fit}
+							effects={effects}
+							effectsOutputSize={effectsOutputSize ?? null}
+							controls={controls}
+							className={className}
+							style={croppedStyle ?? undefined}
+							id={id}
+							onError={onError}
+							pauseWhenLoading={pauseWhenLoading}
+							maxRetries={maxRetries}
+							delayRenderRetries={delayRenderRetries}
+							delayRenderTimeoutInMilliseconds={
+								delayRenderTimeoutInMilliseconds
+							}
+							{...canvasProps}
+						/>
+					</SequenceContent>
+				</Sequence>
+			</Freeze>
+		);
+	},
+);
+
+/*
+ * @description Renders a static image to a `<canvas>` and applies Remotion effects.
+ * @see [Documentation](https://www.remotion.dev/docs/canvasimage)
+ */
+export const CanvasImage = withInteractivitySchema({
+	Component: CanvasImageInner,
+	componentName: '<CanvasImage>',
+	componentIdentity: 'dev.remotion.remotion.CanvasImage',
+	schema: canvasImageSchema,
+	supportsEffects: true,
+});
+
+CanvasImage.displayName = 'CanvasImage';
+
+addSequenceStackTraces(CanvasImage);

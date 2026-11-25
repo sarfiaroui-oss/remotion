@@ -1,0 +1,53 @@
+---
+image: https://remotion.media/docs/generated/articles-docs-preload-preload-video.png
+id: preload-video
+slug: preload-video
+sidebar_label: preloadVideo()
+title: 'preloadVideo()'
+crumb: '@remotion/preload'
+---
+
+_This function is part of the [`@remotion/preload`](/docs/preload) package._
+
+This function preloads a video in the DOM so that when an HTML5 `<video>` element is mounted, it can play immediately.
+
+It only affects HTML5 video elements such as [`<Html5Video>`](/docs/html5-video), not [`<Video>` from `@remotion/media`](/docs/media/video).
+
+:::warning
+Using `preloadVideo()` is not recommended. Use [premounting](/docs/player/premounting) instead to give media time to load and initialize before it appears in the [Player](/docs/player) or [Studio](/docs/studio).
+:::
+
+## Usage
+
+```tsx twoslash
+import {preloadVideo} from '@remotion/preload';
+
+const unpreload = preloadVideo('https://remotion.media/BigBuckBunny.mp4');
+
+// If you want to un-preload the video later
+unpreload();
+```
+
+## How it works
+
+- On Firefox, it appends a `<link rel="preload" as="video">` tag in the head element of the document.
+- In other browsers, it appends a `<video preload="auto">` tag in the body element of the document. On iOS Safari, `preload="metadata"` is used instead.
+
+## Handle redirects
+
+`preloadVideo()` resolves redirects automatically. It first fetches the URL to determine the final URL after any redirects, and then preloads the final URL.
+
+This requires the resource to support CORS. If the URL cannot be fetched, for example because the resource does not support CORS or the request times out, nothing gets preloaded and the error is logged to the console.
+
+To obtain the final URL yourself, use [`resolveRedirect()`](/docs/preload/resolve-redirect).
+
+## Compatibility
+
+<CompatibilityTable chrome firefox safari nodejs="" bun="" serverlessFunctions="" clientSideRendering={false} serverSideRendering player studio hideServers />
+
+This function preloads HTML5 video elements. It does not preload the assets used by [`@remotion/media`](/docs/media) for client-side rendering.
+
+## See also
+
+- [Source code for this function](https://github.com/remotion-dev/remotion/blob/main/packages/preload/src/preload-video.ts)
+- [`resolveRedirect()`](/docs/preload/resolve-redirect)

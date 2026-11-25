@@ -1,0 +1,65 @@
+type UrlHandling = 'query-string' | 'spa';
+
+export const closedAllCanvasTabsStorageKey = 'remotion.closedAllCanvasTabs';
+
+const getUrlHandlingType = (): UrlHandling => {
+	if (window.remotion_isReadOnlyStudio || window.remotion_browserStudio) {
+		return 'query-string';
+	}
+
+	return 'spa';
+};
+
+export const getNavigationWindow = () => {
+	if (window.remotion_browserStudio && window.parent !== window) {
+		return window.parent;
+	}
+
+	return window;
+};
+
+export const getUrlForRoute = (route: string) => {
+	if (getUrlHandlingType() === 'query-string') {
+		return `${getNavigationWindow().location.pathname}?${route}`;
+	}
+
+	return route;
+};
+
+export const pushUrl = (url: string) => {
+	getNavigationWindow().history.pushState({}, 'Studio', getUrlForRoute(url));
+};
+
+export const replaceUrl = (url: string) => {
+	getNavigationWindow().history.replaceState({}, 'Studio', getUrlForRoute(url));
+};
+
+export const clearUrl = () => {
+	window.location.href = window.location.pathname;
+};
+
+export const reloadUrl = () => {
+	if (window.remotion_browserStudioReload) {
+		window.remotion_browserStudioReload();
+		return;
+	}
+
+	window.location.reload();
+};
+
+export const getRoute = () => {
+	if (getUrlHandlingType() === 'query-string') {
+		const route = getNavigationWindow().location.search.substring(1);
+		if (route.startsWith('/')) {
+			return route;
+		}
+
+		if (route !== '' && !route.includes('=') && !route.includes('&')) {
+			return `/${route}`;
+		}
+
+		return '';
+	}
+
+	return window.location.pathname;
+};

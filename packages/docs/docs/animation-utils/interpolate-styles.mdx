@@ -1,0 +1,76 @@
+---
+image: https://remotion.media/docs/generated/articles-docs-animation-utils-interpolate-styles.png
+title: interpolateStyles()
+id: interpolate-styles
+crumb: "@remotion/animation-utils"
+---
+
+_Part of the [`@remotion/animation-utils`](/docs/animation-utils) package._
+
+Interpolates between style objects based on an input value.
+
+## Example
+
+```tsx twoslash
+// ---cut---
+import {
+  interpolateStyles,
+  makeTransform,
+  translateY,
+} from "@remotion/animation-utils";
+
+const MyComponent: React.FC = () => {
+  const animatedStyles = interpolateStyles(
+    15,
+    [0, 30, 60],
+    [
+      { opacity: 0, transform: makeTransform([translateY(-50)]) },
+      { opacity: 1, transform: makeTransform([translateY(0)]) },
+      { opacity: 0, transform: makeTransform([translateY(50)]) },
+    ],
+  );
+
+  return <div style={animatedStyles} />;
+};
+```
+
+## API
+
+Takes the following arguments:
+
+### input
+
+The input value.
+
+### inputRange
+
+The range of values that you expect the input to assume.
+
+### outputStylesRange
+
+The range of output styles that you want the input to map to. Must have the same number of elements as `inputRange`.
+
+### options?
+
+An object with the same keys as the options of [`interpolate()`](/docs/interpolate#easing): `extrapolateLeft`, `extrapolateRight`, `easing` and `posterize` (from v4.0.470). `easing` can be a [per-segment array](/docs/interpolate#per-segment-easing-array) (from v4.0.462) when you have more than two keyframes.
+
+## Return value
+
+A style object representing the interpolated styles for the current input value.
+
+## Usage Notes
+
+- Ensure that the `inputRange` and `outputStylesRange` arrays contain at least two values to facilitate interpolation between styles.
+
+- The `outputStylesRange` array must have the same number of elements as `inputRange`. Each style in `outputStylesRange` corresponds to a specific value in the input range.
+
+## Compatibility
+
+<CompatibilityTable chrome firefox safari nodejs bun serverlessFunctions clientSideRendering serverSideRendering player studio />
+
+When using the generated styles for [client-side rendering](/docs/client-side-rendering), the [supported CSS properties](/docs/client-side-rendering/limitations) still apply.
+
+## See also
+
+- [Source code for this function](https://github.com/remotion-dev/remotion/blob/main/packages/animation-utils/src/transformation-helpers/interpolate-styles/index.tsx)
+- [`@remotion/animation-utils`](/docs/animation-utils)

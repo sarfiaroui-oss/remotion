@@ -1,0 +1,58 @@
+---
+image: https://remotion.media/docs/generated/articles-docs-shapes-callout.png
+title: <Callout />
+crumb: "@remotion/shapes"
+---
+
+import {ShapeSeeAlso, ShapeOptions} from "../../components/shapes/shapes-info"
+
+# &lt;Callout /&gt;<AvailableFrom v="4.0.477" />
+
+_Part of the [`@remotion/shapes`](/docs/shapes) package._
+
+Renders an SVG element containing a callout shape.
+
+## Explorer
+
+<Demo type="callout"/>
+
+## Example
+
+```tsx twoslash title="src/Callout.tsx"
+import { Callout } from "@remotion/shapes";
+import { AbsoluteFill } from "remotion";
+
+export const MyComposition = () => {
+  return (
+    <AbsoluteFill
+      style={{
+        backgroundColor: "white",
+        justifyContent: "center",
+        alignItems: "center",
+      }}
+    >
+      <Callout
+        width={500}
+        height={200}
+        pointerLength={40}
+        pointerBaseWidth={60}
+        pointerDirection="down"
+        cornerRadius={20}
+        fill="#20232a"
+      />
+    </AbsoluteFill>
+  );
+};
+```
+
+## Props
+
+<ShapeOptions shape="callout" all />
+
+## Compatibility
+
+<CompatibilityTable chrome firefox safari nodejs="" bun="" serverlessFunctions="" clientSideRendering serverSideRendering player studio hideServers />
+
+## See also
+
+<ShapeSeeAlso shape="callout"/>

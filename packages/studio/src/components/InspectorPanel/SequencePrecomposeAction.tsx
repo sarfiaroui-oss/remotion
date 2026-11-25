@@ -1,0 +1,174 @@
+import React, {useCallback, useContext, useState} from 'react';
+import {Internals} from 'remotion';
+import {getBrowserStudioOperations} from '../../helpers/browser-studio-operations';
+import {getConnectedCompositions} from '../../helpers/get-connected-compositions';
+import type {SequenceNodePathInfo} from '../../helpers/get-timeline-sequence-sort-key';
+import {FilmIcon} from '../../icons/video';
+import {SetSelectedModalContext} from '../../state/modals';
+import {showNotification} from '../Notifications/NotificationCenter';
+import {precomposeJsxNodes} from '../precompose-jsx-nodes-api';
+import {
+	getCurrentDimensions,
+	getCurrentDuration,
+	getCurrentFps,
+} from '../Timeline/imperative-state';
+import {useResolvedStack} from '../Timeline/use-resolved-stack';
+import {InspectorQuickAction} from './common';
+
+const iconStyle: React.CSSProperties = {
+	display: 'block',
+	height: 16,
+	width: 16,
+};
+
+export const SequencePrecomposeAction: React.FC<{
+	readonly targets: readonly {
+		readonly nodePathInfo: SequenceNodePathInfo;
+		readonly displayName: string | null;
+		readonly line: number | null;
+		readonly singleChildComponent: unknown;
+		readonly isTransition: boolean;
+	}[];
+	readonly sourceActionsDisabled: boolean;
+}> = ({targets, sourceActionsDisabled}) => {
+	const {setSelectedModal} = useContext(SetSelectedModalContext);
+	const {compositions, canvasContent} = useContext(
+		Internals.CompositionManager,
+	);
+	const [busy, setBusy] = useState(false);
+	const browserStudioOperations = getBrowserStudioOperations();
+	const compositionId =
+		canvasContent?.type === 'composition' ? canvasContent.compositionId : null;
+	const composition = compositions.find((item) => item.id === compositionId);
+	const hasConnectedComposition = targets.some(
+		({singleChildComponent}) =>
+			getConnectedCompositions({compositions, singleChildComponent}).length > 0,
+	);
+	const hasTransition = targets.some((target) => target.isTransition);
+	const resolvedCompositionLocation = useResolvedStack(
+		composition?.stack ?? null,
+	);
+	const compositionFile =
+		resolvedCompositionLocation?.source ??
+		(compositionId && browserStudioOperations
+			? browserStudioOperations.getCompositionFile(compositionId)
+			: null);
+	const canChangeSource =
+		!sourceActionsDisabled &&
+		(browserStudioOperations === null ||
+			typeof browserStudioOperations.precomposeJsxNodes === 'function');
+
+	const onPrecompose = useCallback(() => {
+		if (
+			busy ||
+			hasTransition ||
+			!canChangeSource ||
+			hasConnectedComposition ||
+			targets.length === 0
+		) {
+			return;
+		}
+
+		const nodes = targets.map(({nodePathInfo}) => ({
+			fileName: nodePathInfo.sequenceSubscriptionKey.absolutePath,
+			nodePath: nodePathInfo.sequenceSubscriptionKey.nodePath,
+		}));
+		const modalTargets = targets.map(({nodePathInfo, displayName, line}) => ({
+			fileName: nodePathInfo.sequenceSubscriptionKey.absolutePath,
+			displayName,
+			line,
+		}));
+		const openRefactorModal = (failureReason: string | null) => {
+			setSelectedModal({
+				type: 'precompose-refactor',
+				targets: modalTargets,
+				failureReason,
+			});
+		};
+
+		if (compositionFile === null || compositionId === null) {
+			openRefactorModal(null);
+			return;
+		}
+
+		const request = {
+			nodes,
+			compositionFile,
+			compositionId,
+			existingCompositionIds: compositions.map(({id}) => id),
+			metadata: {
+				...getCurrentDimensions(),
+				fps: getCurrentFps(),
+				durationInFrames: getCurrentDuration(),
+			},
+			name: null,
+			dryRun: false,
+		};
+
+		const uniqueSourceNodes =
+			targets.every(
+				({nodePathInfo}) =>
+					nodePathInfo.numberOfSequencesWithThisNodePath === 1,
+			) &&
+			new Set(nodes.map((node) => JSON.stringify(node))).size === nodes.length;
+
+		if (!uniqueSourceNodes) {
+			openRefactorModal(null);
+			return;
+		}
+
+		if (nodes.some((node) => node.fileName !== nodes[0].fileName)) {
+			openRefactorModal(null);
+			return;
+		}
+
+		setBusy(true);
+		precomposeJsxNodes({...request, dryRun: true})
+			.then((result) => {
+				if (!result.success) {
+					showNotification(result.reason, 4000);
+					return;
+				}
+
+				if (!result.canPrecompose || result.newCompositionId === null) {
+					openRefactorModal(result.reason);
+					return;
+				}
+
+				setSelectedModal({
+					type: 'precompose-name',
+					request,
+					suggestedCompositionId: result.newCompositionId,
+					refactorTargets: modalTargets,
+				});
+			})
+			.catch((error) => {
+				showNotification((error as Error).message, 4000);
+			})
+			.finally(() => setBusy(false));
+	}, [
+		busy,
+		canChangeSource,
+		compositionFile,
+		compositionId,
+		compositions,
+		hasConnectedComposition,
+		hasTransition,
+		setSelectedModal,
+		targets,
+	]);
+
+	if (!canChangeSource || hasConnectedComposition || targets.length === 0) {
+		return null;
+	}
+
+	return (
+		<InspectorQuickAction
+			disabled={busy || hasTransition}
+			onClick={onPrecompose}
+			renderIcon={(color) => <FilmIcon color={color} style={iconStyle} />}
+		>
+			Pre-compose
+		</InspectorQuickAction>
+	);
+};

@@ -1,0 +1,457 @@
+import {expect, test} from 'bun:test';
+import {flattenVolumeArray} from '../assets/flatten-volume-array';
+import type {MediaAsset} from '../assets/types';
+import {getExtraFramesToCapture} from '../get-extra-frames-to-capture';
+import {stringifyFfmpegFilter} from '../stringify-ffmpeg-filter';
+
+const src =
+	'/var/folders/hl/p8pg9kw15dbg3l7dbpn0scc80000gn/T/react-motion-graphicsh871Pk/1fe4a495500e1658167982183be07231.mp4';
+
+const baseAsset: MediaAsset = {
+	type: 'video',
+	src,
+	duration: 20,
+	startInVideo: 0,
+	trimLeft: 0,
+	volume: 1,
+	id: '1',
+	playbackRate: 1,
+	toneFrequency: 1,
+	preservePitch: true,
+	audioStartFrame: 0,
+	audioStreamIndex: 0,
+};
+
+const expandAsset = ({
+	base,
+	extraFramesToCaptureAssets,
+}: {
+	base: MediaAsset;
+	extraFramesToCaptureAssets: number[];
+}): MediaAsset => {
+	return {
+		...base,
+		duration: base.duration + extraFramesToCaptureAssets.length,
+	};
+};
+
+test('Should create a basic filter correctly', () => {
+	expect(
+		stringifyFfmpegFilter({
+			fps: 30,
+			asset: {
+				...baseAsset,
+				duration: 200,
+			},
+			channels: 1,
+			assetDuration: 10,
+			chunkLengthInSeconds: 3.3333,
+			trimLeftOffset: 0,
+			trimRightOffset: 0,
+			forSeamlessAacConcatenation: false,
+			volume: flattenVolumeArray(baseAsset.volume),
+			indent: false,
+			logLevel: 'info',
+			presentationTimeOffsetInSeconds: 0,
+			sampleRate: 48000,
+		}),
+	).toEqual({
+		actualTrimLeft: 0,
+		filter:
+			'[0:a]aformat=sample_fmts=s16:sample_rates=48000,atrim=0us:6666666.666666667us[a0]',
+		pad_end: null,
+		pad_start: null,
+	});
+});
+
+const stringifyWithToneFrequency = (toneFrequency: number) => {
+	const result = stringifyFfmpegFilter({
+		fps: 30,
+		asset: {
+			...baseAsset,
+			duration: 200,
+			toneFrequency,
+		},
+		channels: 1,
+		assetDuration: 10,
+		chunkLengthInSeconds: 3.3333,
+		trimLeftOffset: 0,
+		trimRightOffset: 0,
+		forSeamlessAacConcatenation: false,
+		volume: flattenVolumeArray(baseAsset.volume),
+		indent: false,
+		logLevel: 'info',
+		presentationTimeOffsetInSeconds: 0,
+		sampleRate: 48000,
+	});
+
+	if (result === null) {
+		throw new Error('Expected a filter for a single channel asset');
+	}
+
+	return result.filter as string;
+};
+
+test('toneFrequency: every atempo stage stays inside the supported rate', () => {
+	// atempo only accepts 0.5 to 2, everything outside must be chained.
+	// https://trac.ffmpeg.org/wiki/How%20to%20speed%20up%20/%20slow%20down%20a%20video
+	// A single `atempo=1/${toneFrequency}` reaches FFmpeg as `atempo=1/0.15`,
+	// which FFmpeg evaluates as a 6.67x speedup and aborts the render with
+	// `Assertion atempo->position[0] <= stop_here failed at af_atempo.c:494`.
+	for (const toneFrequency of [0.01, 0.1, 0.15, 0.2, 0.5, 0.75, 2]) {
+		const filter = stringifyWithToneFrequency(toneFrequency);
+		const atempoRates = [...filter.matchAll(/atempo=([^,[]+)/g)].map((match) =>
+			Number(match[1]),
+		);
+
+		expect(atempoRates.length).toBeGreaterThan(0);
+
+		for (const rate of atempoRates) {
+			expect(Number.isFinite(rate)).toBe(true);
+			expect(rate).toBeGreaterThanOrEqual(0.5);
+			expect(rate).toBeLessThanOrEqual(2);
+		}
+
+		// Chaining every stage must still multiply out to the requested tempo.
+		const reachedFrequency = atempoRates.reduce((acc, rate) => acc * rate, 1);
+		expect(reachedFrequency).toBeCloseTo(1 / toneFrequency, 3);
+	}
+});
+
+test('preservePitch: false uses asetrate/aresample instead of atempo', () => {
+	expect(
+		stringifyFfmpegFilter({
+			fps: 30,
+			asset: {
+				...baseAsset,
+				duration: 200,
+				playbackRate: 2,
+				preservePitch: false,
+			},
+			channels: 1,
+			assetDuration: 10,
+			chunkLengthInSeconds: 3.3333,
+			trimLeftOffset: 0,
+			trimRightOffset: 0,
+			forSeamlessAacConcatenation: false,
+			volume: flattenVolumeArray(baseAsset.volume),
+			indent: false,
+			logLevel: 'info',
+			presentationTimeOffsetInSeconds: 0,
+			sampleRate: 48000,
+		}),
+	).toEqual({
+		actualTrimLeft: 0,
+		filter:
+			'[0:a]aformat=sample_fmts=s16:sample_rates=48000,asetrate=48000*2,aresample=48000,atrim=0us:5000000us[a0]',
+		pad_end: null,
+		pad_start: null,
+	});
+});
+test('Should trim audio spanning the full chunk to the AAC boundary', () => {
+	const {
+		chunkLengthInSeconds,
+		trimLeftOffset,
+		trimRightOffset,
+		extraFramesToCaptureAssetsBackend,
+		extraFramesToCaptureAssetsFrontend,
+	} = getExtraFramesToCapture({
+		compositionStart: 0,
+		forSeamlessAacConcatenation: true,
+		fps: 30,
+		realFrameRange: [0, 99],
+		sampleRate: 48000,
+	});
+
+	expect(chunkLengthInSeconds).toEqual(3.3706666666666667);
+	expect(trimLeftOffset).toEqual(0);
+	expect(trimRightOffset).toEqual(-0.02933333333333318);
+
+	expect(
+		stringifyFfmpegFilter({
+			fps: 30,
+			asset: expandAsset({
+				extraFramesToCaptureAssets: [
+					...extraFramesToCaptureAssetsFrontend,
+					...extraFramesToCaptureAssetsBackend,
+				],
+				base: {
+					...baseAsset,
+					// Cover the entire chunk, including the extra captured frames.
+					duration: 100,
+				},
+			}),
+			channels: 1,
+			assetDuration: 100,
+			chunkLengthInSeconds,
+			trimLeftOffset,
+			trimRightOffset,
+			forSeamlessAacConcatenation: true,
+			volume: flattenVolumeArray(baseAsset.volume),
+			indent: false,
+			logLevel: 'info',
+			presentationTimeOffsetInSeconds: 0,
+			sampleRate: 48000,
+		}),
+	).toEqual({
+		actualTrimLeft: 0,
+		filter:
+			'[0:a]aformat=sample_fmts=s16:sample_rates=48000,atrim=0us:3370666.6666666665us[a0]',
+		pad_end: null,
+		pad_start: null,
+	});
+});
+
+test('Should preserve the end of audio finishing before the chunk boundary', () => {
+	const {
+		chunkLengthInSeconds,
+		trimLeftOffset,
+		trimRightOffset,
+		extraFramesToCaptureAssetsBackend,
+		extraFramesToCaptureAssetsFrontend,
+	} = getExtraFramesToCapture({
+		compositionStart: 0,
+		forSeamlessAacConcatenation: true,
+		fps: 30,
+		realFrameRange: [0, 99],
+		sampleRate: 48000,
+	});
+
+	expect(chunkLengthInSeconds).toEqual(3.3706666666666667);
+	expect(trimRightOffset).toEqual(-0.02933333333333318);
+
+	expect(
+		stringifyFfmpegFilter({
+			fps: 30,
+			asset: expandAsset({
+				base: {
+					...baseAsset,
+					trimLeft: 10,
+				},
+				extraFramesToCaptureAssets: [
+					...extraFramesToCaptureAssetsFrontend,
+					...extraFramesToCaptureAssetsBackend,
+				],
+			}),
+			channels: 1,
+			assetDuration: 10,
+			chunkLengthInSeconds,
+			trimLeftOffset,
+			trimRightOffset,
+			forSeamlessAacConcatenation: true,
+			volume: flattenVolumeArray(baseAsset.volume),
+			indent: false,
+			logLevel: 'info',
+			presentationTimeOffsetInSeconds: 0,
+			sampleRate: 48000,
+		}),
+	).toEqual({
+		actualTrimLeft: 0.3333333333333333,
+		filter:
+			'[0:a]aformat=sample_fmts=s16:sample_rates=48000,atrim=333333.3333333333us:1066666.6666666667us[a0]',
+		pad_end: 'apad=pad_len=126592',
+		pad_start: null,
+	});
+});
+
+test('Should add padding if audio is too short', () => {
+	const {trimLeftOffset, trimRightOffset} = getExtraFramesToCapture({
+		compositionStart: 0,
+		forSeamlessAacConcatenation: false,
+		fps: 30,
+		realFrameRange: [0, 99],
+		sampleRate: 48000,
+	});
+
+	const padding = Math.round((3.3333 - 2 / 3) * 48000);
+
+	expect(
+		stringifyFfmpegFilter({
+			fps: 30,
+			asset: {
+				...baseAsset,
+				trimLeft: 10,
+			},
+			channels: 1,
+			assetDuration: 1,
+			chunkLengthInSeconds: 3.3333,
+			trimLeftOffset,
+			trimRightOffset,
+			forSeamlessAacConcatenation: false,
+			volume: flattenVolumeArray(baseAsset.volume),
+			indent: false,
+			logLevel: 'info',
+			presentationTimeOffsetInSeconds: 0,
+			sampleRate: 48000,
+		}),
+	).toEqual({
+		actualTrimLeft: 0.3333333333333333,
+		filter:
+			'[0:a]aformat=sample_fmts=s16:sample_rates=48000,atrim=333333.3333333333us:1000000us[a0]',
+		pad_end: `apad=pad_len=${padding}`,
+		pad_start: null,
+	});
+});
+
+test('Should handle delay correctly', () => {
+	const {
+		chunkLengthInSeconds,
+		trimLeftOffset,
+		trimRightOffset,
+		extraFramesToCaptureAssetsBackend,
+		extraFramesToCaptureAssetsFrontend,
+	} = getExtraFramesToCapture({
+		compositionStart: 0,
+		forSeamlessAacConcatenation: true,
+		fps: 30,
+		realFrameRange: [0, 99],
+		sampleRate: 48000,
+	});
+
+	expect(
+		stringifyFfmpegFilter({
+			fps: 30,
+			asset: expandAsset({
+				base: {
+					...baseAsset,
+					trimLeft: 10,
+					startInVideo: 80,
+				},
+				extraFramesToCaptureAssets: [
+					...extraFramesToCaptureAssetsFrontend,
+					...extraFramesToCaptureAssetsBackend,
+				],
+			}),
+			channels: 1,
+			assetDuration: 1,
+			chunkLengthInSeconds,
+			trimLeftOffset,
+			trimRightOffset,
+			forSeamlessAacConcatenation: true,
+			volume: flattenVolumeArray(baseAsset.volume),
+			indent: false,
+			logLevel: 'info',
+			presentationTimeOffsetInSeconds: 0,
+			sampleRate: 48000,
+		}),
+	).toEqual({
+		actualTrimLeft: 0.3333333333333333,
+		filter:
+			'[0:a]aformat=sample_fmts=s16:sample_rates=48000,atrim=333333.3333333333us:1000000us[a0]',
+		pad_end: 'apad=pad_len=1792',
+		pad_start: 'adelay=128000S|128000S',
+	});
+});
+
+test('Should offset multiple channels', () => {
+	const {
+		chunkLengthInSeconds,
+		trimLeftOffset,
+		trimRightOffset,
+		extraFramesToCaptureAssetsBackend,
+		extraFramesToCaptureAssetsFrontend,
+	} = getExtraFramesToCapture({
+		compositionStart: 0,
+		forSeamlessAacConcatenation: true,
+		fps: 30,
+		realFrameRange: [0, 99],
+		sampleRate: 48000,
+	});
+
+	expect(
+		stringifyFfmpegFilter({
+			fps: 30,
+			asset: expandAsset({
+				base: {
+					...baseAsset,
+					trimLeft: 10,
+					startInVideo: 80,
+				},
+				extraFramesToCaptureAssets: [
+					...extraFramesToCaptureAssetsFrontend,
+					...extraFramesToCaptureAssetsBackend,
+				],
+			}),
+			channels: 3,
+			assetDuration: 1,
+			chunkLengthInSeconds,
+			trimLeftOffset,
+			trimRightOffset,
+			forSeamlessAacConcatenation: true,
+			volume: flattenVolumeArray(baseAsset.volume),
+			indent: false,
+			logLevel: 'info',
+			presentationTimeOffsetInSeconds: 0,
+			sampleRate: 48000,
+		}),
+	).toEqual({
+		actualTrimLeft: 0.3333333333333333,
+		filter:
+			'[0:a]aformat=sample_fmts=s16:sample_rates=48000,atrim=333333.3333333333us:1000000us[a0]',
+		pad_end: 'apad=pad_len=1792',
+		pad_start: 'adelay=128000S|128000S|128000S|128000S',
+	});
+});
+
+test('Should calculate pad correctly with a lot of playbackRate', () => {
+	const naturalDurationInSeconds = 1000 / 30 / 16;
+	const expectedPadLength =
+		(2000 / 30) * 48000 - naturalDurationInSeconds * 48000;
+
+	const {
+		chunkLengthInSeconds,
+		trimLeftOffset,
+		trimRightOffset,
+		extraFramesToCaptureAssetsBackend,
+		extraFramesToCaptureAssetsFrontend,
+	} = getExtraFramesToCapture({
+		compositionStart: 0,
+		forSeamlessAacConcatenation: false,
+		fps: 30,
+		realFrameRange: [0, 1999],
+		sampleRate: 48000,
+	});
+
+	expect(
+		stringifyFfmpegFilter({
+			fps: 30,
+			asset: expandAsset({
+				base: {
+					type: 'video',
+					src,
+					duration: 1000,
+					volume: 1,
+					id: '1',
+					trimLeft: 0,
+					startInVideo: 0,
+					playbackRate: 16,
+					toneFrequency: 1,
+					preservePitch: true,
+					audioStartFrame: 0,
+					audioStreamIndex: 0,
+				},
+				extraFramesToCaptureAssets: [
+					...extraFramesToCaptureAssetsFrontend,
+					...extraFramesToCaptureAssetsBackend,
+				],
+			}),
+			channels: 1,
+			assetDuration: 33.333333,
+			chunkLengthInSeconds,
+			trimLeftOffset,
+			trimRightOffset,
+			forSeamlessAacConcatenation: false,
+			volume: flattenVolumeArray(baseAsset.volume),
+			indent: false,
+			logLevel: 'info',
+			presentationTimeOffsetInSeconds: 0,
+			sampleRate: 48000,
+		}),
+	).toEqual({
+		actualTrimLeft: 0,
+		filter:
+			'[0:a]aformat=sample_fmts=s16:sample_rates=48000,atempo=2.00000,atempo=2.00000,atempo=2.00000,atempo=2.00000,atrim=0us:2083333.3125000002us[a0]',
+		pad_end: `apad=pad_len=${expectedPadLength}`,
+		pad_start: null,
+	});
+});

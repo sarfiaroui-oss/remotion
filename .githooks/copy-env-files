@@ -1,0 +1,46 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+git_common_dir=$(git rev-parse --git-common-dir)
+main_repo=$(cd "$git_common_dir/.." && pwd)
+current_dir=$(pwd)
+
+if [ "$current_dir" = "$main_repo" ]; then
+	exit 0
+fi
+
+echo "Worktree detected: $current_dir"
+
+prune_args=(-name ".git" -prune)
+
+# Discover ignored directories one level at a time so subsequent scans never
+# descend into them. Batch each level into a single Git invocation.
+for depth in 1 2 3; do
+	while IFS= read -r -d '' dir; do
+		prune_args+=(-o -path "$dir" -prune)
+	done < <(
+		find "$main_repo" -maxdepth "$depth" \( "${prune_args[@]}" \) -o -type d -print0 |
+			git -C "$main_repo" check-ignore --stdin -z || true
+	)
+done
+
+copied=0
+skipped=0
+
+while IFS= read -r -d '' envfile; do
+	relative_path="${envfile#"$main_repo"/}"
+	target="$current_dir/$relative_path"
+
+	if [ -f "$target" ]; then
+		echo "  skipped $relative_path (already exists)"
+		skipped=$((skipped + 1))
+		continue
+	fi
+
+	mkdir -p "$(dirname "$target")"
+	cp "$envfile" "$target"
+	echo "  copied $relative_path"
+	copied=$((copied + 1))
+done < <(find "$main_repo" \( "${prune_args[@]}" \) -o -name ".env*" -type f -print0)
+
+echo "Environment files synced: $copied copied, $skipped skipped."

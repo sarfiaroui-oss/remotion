@@ -1,0 +1,385 @@
+import {Internals, type LogLevel} from 'remotion';
+import {getBiggestBoundingClientRect} from '../get-biggest-bounding-client-rect';
+import type {InternalState} from '../internal-state';
+import {createLayer} from '../take-screenshot';
+import {
+	calculateTransforms,
+	type TransformStyleCache,
+} from './calculate-transforms';
+import {getWiderRectAndExpand} from './clamp-rect-to-parent-bounds';
+import {doRectsIntersect} from './do-rects-intersect';
+import {drawElement} from './draw-element';
+import type {DrawFn} from './drawn-fn';
+import {getPrecomposedLayerGeometry} from './get-precomposed-layer-geometry';
+import {
+	getPrecomposeRectFor3DTransform,
+	handle3dTransform,
+} from './handle-3d-transform';
+import {
+	applyFilterToDrawOperation,
+	applySvgFilterToPrecomposedCanvas,
+	scaleFilterLengths,
+	getPrecomposeRectForFilter,
+} from './handle-filter';
+import {
+	getPrecomposeRectForMask,
+	handleMask,
+	handleSvgClip,
+} from './handle-mask';
+import {setOpacity} from './opacity';
+import {roundToExpandRect} from './round-to-expand-rect';
+import {scaleRect} from './scale-rect';
+import {setTransform} from './transform';
+import {transformDOMRect} from './transform-rect-with-matrix';
+
+export type ProcessNodeReturnValue =
+	| {type: 'continue'; cleanupAfterChildren: null | (() => void)}
+	| {type: 'skip-children'};
+
+export const processNode = async ({
+	element,
+	context,
+	draw,
+	logLevel,
+	parentRect,
+	internalState,
+	rootElement,
+	scale,
+	waitForPageResponsiveness,
+	transformStyleCache,
+	isolatedElements,
+}: {
+	element: HTMLElement | SVGElement;
+	context: OffscreenCanvasRenderingContext2D;
+	draw: DrawFn;
+	logLevel: LogLevel;
+	parentRect: DOMRect;
+	internalState: InternalState;
+	rootElement: HTMLElement | SVGElement;
+	scale: number;
+	waitForPageResponsiveness: (() => Promise<void>) | null;
+	transformStyleCache: TransformStyleCache;
+	isolatedElements: WeakSet<Element>;
+}): Promise<ProcessNodeReturnValue> => {
+	using transforms = calculateTransforms({
+		element,
+		rootElement,
+		transformStyleCache,
+		isolated: isolatedElements.has(element),
+	});
+
+	const {opacity, computedStyle, totalMatrix, dimensions, precompositing} =
+		transforms;
+	if (opacity === 0) {
+		return {type: 'skip-children'};
+	}
+
+	// When backfaceVisibility is 'hidden', don't render if the element is rotated
+	// to show its backface. The backface is visible when the z-component of the
+	// transformed normal vector (0, 0, 1) is negative, which corresponds to m33 < 0.
+	if (computedStyle.backfaceVisibility === 'hidden' && totalMatrix.m33 < 0) {
+		return {type: 'skip-children'};
+	}
+
+	if (dimensions.width <= 0 || dimensions.height <= 0) {
+		return {type: 'continue', cleanupAfterChildren: null};
+	}
+
+	const rect = new DOMRect(
+		dimensions.left - parentRect.x,
+		dimensions.top - parentRect.y,
+		dimensions.width,
+		dimensions.height,
+	);
+
+	if (precompositing.needsPrecompositing) {
+		const start = Date.now();
+
+		let precomposeRect: DOMRect | null = null;
+		if (precompositing.needsMaskImage || precompositing.needsSvgClip) {
+			precomposeRect = roundToExpandRect(getPrecomposeRectForMask(element));
+		}
+
+		if (precompositing.needs3DTransformViaWebGL) {
+			const tentativePrecomposeRect = getPrecomposeRectFor3DTransform({
+				element,
+				parentRect,
+				matrix: totalMatrix,
+			});
+			if (!tentativePrecomposeRect) {
+				return {type: 'continue', cleanupAfterChildren: null};
+			}
+
+			precomposeRect = roundToExpandRect(
+				getWiderRectAndExpand({
+					firstRect: precomposeRect,
+					secondRect: tentativePrecomposeRect,
+				}),
+			);
+		}
+
+		if (precompositing.needsFilterPrecompositing) {
+			const tentativePrecomposeRect = getPrecomposeRectForFilter({
+				element,
+				filter: precompositing.needsFilterPrecompositing,
+			});
+
+			precomposeRect = roundToExpandRect(
+				getWiderRectAndExpand({
+					firstRect: precomposeRect,
+					secondRect: tentativePrecomposeRect,
+				}),
+			);
+		}
+
+		const needsGroup =
+			precompositing.needsBlendMode !== null ||
+			precompositing.needsIsolation ||
+			precompositing.needsSvgClip !== null ||
+			precompositing.needsFilterPrecompositing?.includes('url(') === true;
+
+		if (needsGroup) {
+			precomposeRect = roundToExpandRect(
+				getWiderRectAndExpand({
+					firstRect: precomposeRect,
+					secondRect: getBiggestBoundingClientRect(
+						element,
+						true,
+						precompositing.needsSvgClip !== null,
+					),
+				}),
+			);
+		}
+
+		if (!precomposeRect) {
+			throw new Error('Precompose rect not found');
+		}
+
+		if (precomposeRect.width <= 0 || precomposeRect.height <= 0) {
+			return {type: 'continue', cleanupAfterChildren: null};
+		}
+
+		const visibleRect = totalMatrix.is2D
+			? transformDOMRect({rect: precomposeRect, matrix: totalMatrix})
+			: precomposeRect;
+		if (!doRectsIntersect(visibleRect, parentRect)) {
+			return totalMatrix.is2D
+				? {type: 'skip-children'}
+				: {type: 'continue', cleanupAfterChildren: null};
+		}
+
+		const is3DPrecomposition = precompositing.needs3DTransformViaWebGL;
+
+		const {
+			rect: layerRect,
+			scale: layerScale,
+			pixelWidth: layerPixelWidth,
+			pixelHeight: layerPixelHeight,
+		} = getPrecomposedLayerGeometry({
+			precomposeRect,
+			totalMatrix,
+			parentRect,
+			scale,
+			is3DPrecomposition,
+		});
+
+		const tempContext = await createLayer({
+			transparent: true,
+			cutout: layerRect,
+			element,
+			logLevel,
+			internalState,
+			scale: layerScale,
+			onlyBackgroundClipText: false,
+			waitForPageResponsiveness,
+		});
+		if (waitForPageResponsiveness !== null) {
+			await waitForPageResponsiveness();
+		}
+
+		let drawable: OffscreenCanvas | null = tempContext.canvas;
+
+		const rectAfterTransforms = roundToExpandRect(
+			scaleRect({
+				scale,
+				rect: transformDOMRect({
+					rect: precomposeRect,
+					matrix: totalMatrix,
+				}),
+			}),
+		);
+
+		// Only graphs with qualified coordinate mapping can run at raster scales
+		// other than 1. Projected surfaces still need separate region mapping.
+		using svgFilteredLayer =
+			!is3DPrecomposition &&
+			precompositing.needsFilterPrecompositing?.includes('url(')
+				? applySvgFilterToPrecomposedCanvas({
+						source: drawable,
+						scale: layerScale,
+						sourceRect: new DOMRect(
+							(dimensions.left - layerRect.left) * layerScale,
+							(dimensions.top - layerRect.top) * layerScale,
+							dimensions.width * layerScale,
+							dimensions.height * layerScale,
+						),
+						filter: precompositing.needsFilterPrecompositing,
+						ownerDocument: element.ownerDocument,
+					})
+				: null;
+
+		if (svgFilteredLayer) {
+			tempContext.save();
+			tempContext.resetTransform();
+			tempContext.globalAlpha = 1;
+			tempContext.globalCompositeOperation = 'copy';
+			tempContext.drawImage(
+				svgFilteredLayer.canvas,
+				-svgFilteredLayer.sourceX,
+				-svgFilteredLayer.sourceY,
+			);
+			tempContext.restore();
+		}
+
+		if (precompositing.needsFilterPrecompositing && !svgFilteredLayer) {
+			tempContext.save();
+			tempContext.resetTransform();
+			tempContext.globalAlpha = 1;
+			tempContext.globalCompositeOperation = 'copy';
+			applyFilterToDrawOperation({
+				context: tempContext,
+				filter: scaleFilterLengths(
+					precompositing.needsFilterPrecompositing,
+					layerScale,
+				),
+				drawFn: () => tempContext.drawImage(tempContext.canvas, 0, 0),
+			});
+			tempContext.restore();
+		}
+
+		if (precompositing.needsSvgClip) {
+			await handleSvgClip({
+				element,
+				resource: precompositing.needsSvgClip,
+				maskRect: dimensions,
+				precomposeRect: layerRect,
+				tempContext,
+			});
+		}
+
+		if (precompositing.needsMaskImage) {
+			await handleMask({
+				maskImageInfo: precompositing.needsMaskImage,
+				maskRect: dimensions,
+				precomposeRect: layerRect,
+				tempContext,
+				scale: layerScale,
+				internalState,
+			});
+			if (waitForPageResponsiveness !== null) {
+				await waitForPageResponsiveness();
+			}
+		}
+
+		if (precompositing.needs3DTransformViaWebGL) {
+			const t = handle3dTransform({
+				matrix: totalMatrix,
+				sourceRect: precomposeRect,
+				tempCanvas: drawable,
+				rectAfterTransforms,
+				internalState,
+				scale,
+			});
+			if (t) {
+				drawable = t;
+			}
+
+			if (waitForPageResponsiveness !== null) {
+				await waitForPageResponsiveness();
+			}
+		}
+
+		const previousTransform = context.getTransform();
+
+		if (is3DPrecomposition) {
+			context.setTransform(new DOMMatrix());
+		} else {
+			// Preserve 2D rotation and skew instead of stretching the layer into
+			// the axis-aligned bounds of its transformed corners.
+			setTransform({
+				ctx: context,
+				transform: totalMatrix,
+				parentRect,
+				scale,
+			});
+		}
+
+		const destinationRect = is3DPrecomposition
+			? rectAfterTransforms
+			: layerRect;
+		const parentOffsetScale = is3DPrecomposition ? scale : 1;
+
+		const drawPrecomposedCanvas = () => {
+			context.drawImage(
+				drawable,
+				0,
+				0,
+				layerPixelWidth ?? drawable.width,
+				layerPixelHeight ?? drawable.height,
+				destinationRect.left - parentRect.x * parentOffsetScale,
+				destinationRect.top - parentRect.y * parentOffsetScale,
+				destinationRect.width,
+				destinationRect.height,
+			);
+		};
+
+		const previousCompositeOperation = context.globalCompositeOperation;
+		if (precompositing.needsBlendMode !== null) {
+			context.globalCompositeOperation = precompositing.needsBlendMode;
+		}
+
+		const finishOpacity = needsGroup
+			? setOpacity({ctx: context, opacity})
+			: () => {};
+
+		drawPrecomposedCanvas();
+
+		finishOpacity();
+		context.globalCompositeOperation = previousCompositeOperation;
+		context.setTransform(previousTransform);
+		if (waitForPageResponsiveness !== null) {
+			await waitForPageResponsiveness();
+		}
+
+		Internals.Log.trace(
+			{
+				logLevel,
+				tag: '@remotion/web-renderer',
+			},
+			`Transforming element in 3D - canvas size: ${precomposeRect.width}x${precomposeRect.height} - compose: ${Date.now() - start}ms - helper canvas: ${drawable.width}x${drawable.height}`,
+		);
+		internalState.addPrecompose({
+			canvasWidth: precomposeRect.width,
+			canvasHeight: precomposeRect.height,
+		});
+
+		return {type: 'skip-children'};
+	}
+
+	const {cleanupAfterChildren} = await drawElement({
+		rect,
+		computedStyle,
+		context,
+		draw,
+		opacity,
+		totalMatrix,
+		hasCssTransform: transforms.hasCssTransform,
+		parentRect,
+		logLevel,
+		element,
+		internalState,
+		scale,
+	});
+
+	return {type: 'continue', cleanupAfterChildren};
+};

@@ -1,0 +1,28 @@
+import {Player} from '@remotion/player';
+import React from 'react';
+import phone from './3DPhone/assets/phone.mp4';
+import {Scene} from './3DPhone/Scene';
+
+export const ThreeDPlayer: React.FC = () => {
+	return (
+		<Player
+			acknowledgeRemotionLicense
+			component={Scene}
+			compositionWidth={1280}
+			compositionHeight={720}
+			durationInFrames={300}
+			controls
+			clickToPlay={false}
+			spaceKeyToPlayOrPause={false}
+			loop
+			style={{
+				width: '100%',
+			}}
+			fps={30}
+			inputProps={{
+				videoSrc: phone,
+				baseScale: 1,
+			}}
+		/>
+	);
+};

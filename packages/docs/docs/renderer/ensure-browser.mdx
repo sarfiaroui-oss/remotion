@@ -1,0 +1,130 @@
+---
+image: https://remotion.media/docs/generated/articles-docs-renderer-ensure-browser.png
+title: ensureBrowser()
+id: ensure-browser
+crumb: '@remotion/renderer'
+---
+
+# ensureBrowser()<AvailableFrom v="4.0.137" />
+
+Ensures a browser is locally installed so a Remotion render can be executed.
+
+```tsx twoslash title="Simple usage"
+import {ensureBrowser} from '@remotion/renderer';
+
+await ensureBrowser();
+```
+
+```tsx twoslash title="Setting a specific Chrome version and listening to progress"
+import {ensureBrowser} from '@remotion/renderer';
+
+await ensureBrowser({
+  onBrowserDownload: () => {
+    console.log('Downloading browser');
+
+    return {
+      version: '157.0.8080.0',
+      onProgress: ({percent}) => {
+        console.log(`${Math.round(percent * 100)}% downloaded`);
+      },
+    };
+  },
+});
+```
+
+## API
+
+An object with the following properties, all of which are optional:
+
+### `chromeMode?`<AvailableFrom v="4.0.248" />
+
+<Options id="chrome-mode" />
+
+### `browserExecutable?`
+
+Pass a path to a browser executable that you want to use instead of downloading.  
+If the path does not exist, this function will throw.  
+Pass the same path to any other API that supports the `browserExecutable` option.
+
+### `logLevel?`
+
+<Options id="log" />
+
+### `onBrowserDownload?`
+
+Hook into the browser download progress, and optionally specify which Chrome version to use.  
+See the example below for the function signature.
+
+Most projects don't need to pass `onBrowserDownload`, or only use it to show the download progress and return `version: null`. Remotion then uses its default Chrome Headless Shell build, which includes optimizations such as [shared-memory capture](/docs/shared-memory-capture).  
+Only return a `version` if your environment needs a specific Chrome build, for example one that contains a fix for your platform. Custom versions are stock builds from Google without Remotion's optimizations.
+
+`ensureBrowser()` calls this function every time and uses the `version` you return, downloading it if it is not installed yet. `onProgress` is only called if a download happens.
+
+Other APIs that accept `onBrowserDownload`, such as [`renderMedia()`](/docs/renderer/render-media#onbrowserdownload) and [`selectComposition()`](/docs/renderer/select-composition#onbrowserdownload), use Remotion's default version if it is installed and only call `onBrowserDownload` otherwise. To use a custom version in all APIs, pass the `path` returned by `ensureBrowser()` as `browserExecutable`:
+
+```tsx twoslash title="render.ts"
+import {ensureBrowser, renderMedia, selectComposition} from '@remotion/renderer';
+const serveUrl = 'https://example.com';
+// ---cut---
+const browser = await ensureBrowser({
+  onBrowserDownload: () => ({
+    version: '144.0.7559.20',
+    onProgress: () => undefined,
+  }),
+});
+if (browser.type !== 'local-puppeteer-browser') {
+  throw new Error('Expected a downloaded browser');
+}
+
+const composition = await selectComposition({
+  serveUrl,
+  id: 'MyComp',
+  browserExecutable: browser.path,
+});
+
+await renderMedia({
+  composition,
+  serveUrl,
+  codec: 'h264',
+  outputLocation: 'out.mp4',
+  browserExecutable: browser.path,
+});
+```
+
+From v4.0.544, Remotion installs each version into its own folder, so installing one version does not delete another.
+
+```tsx twoslash title="init.ts"
+import {ensureBrowser, OnBrowserDownload, DownloadBrowserProgressFn} from '@remotion/renderer';
+
+const onProgress: DownloadBrowserProgressFn = ({percent, downloadedBytes, totalSizeInBytes}) => {
+  console.log(`${Math.round(percent * 100)}% downloaded`);
+};
+
+const onBrowserDownload: OnBrowserDownload = () => {
+  console.log('Downloading browser');
+
+  return {
+    // Pass `null` to use Remotion's recommendation.
+    version: '157.0.8080.0',
+    onProgress,
+  };
+};
+
+await ensureBrowser({
+  onBrowserDownload,
+});
+```
+
+## Return value
+
+A promise resolving to an object describing the browser that is now available. Its `type` field is `"user-defined-path"` if a [`browserExecutable`](#browserexecutable) was passed, otherwise `"local-puppeteer-browser"`. Both include the `path` of the executable.
+
+## Compatibility
+
+<CompatibilityTable chrome={false} firefox={false} safari={false} nodejs={true} bun={true} serverlessFunctions={false} clientSideRendering={false} serverSideRendering={true} player={false} studio={false} />
+
+## See also
+
+- [Source code for this function](https://github.com/remotion-dev/remotion/blob/main/packages/renderer/src/ensure-browser.ts)
+- [Chrome Headless Shell](/docs/miscellaneous/chrome-headless-shell)
+- [Server-Side rendering](/docs/ssr)

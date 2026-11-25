@@ -1,0 +1,495 @@
+import {
+	useCallback,
+	useContext,
+	useLayoutEffect,
+	useMemo,
+	useRef,
+	useState,
+} from 'react';
+import {
+	AbsoluteFill,
+	getHtmlInCanvasUnsupportedMessage,
+	HtmlInCanvas,
+	Internals,
+	useCurrentFrame,
+	useDelayRender,
+	useRemotionEnvironment,
+	type EffectsProp,
+	type EffectsOutputSize,
+} from 'remotion';
+import type {DrawFunction} from './TransitionSeries';
+import type {
+	TransitionPresentation,
+	TransitionPresentationComponentProps,
+} from './types';
+
+const transferredCanvases = new WeakMap<HTMLCanvasElement, OffscreenCanvas>();
+
+const HtmlInCanvasPresentationWithSupport = <
+	TPassedProps extends Record<string, unknown>,
+>({
+	children,
+	onElementImage,
+	onUnmount,
+	presentationProgress,
+	presentationDirection,
+	presentationDurationInFrames,
+	shader,
+	effects,
+	effectsOutputSize,
+	passedProps,
+	bothEnteringAndExiting,
+}: TransitionPresentationComponentProps<TPassedProps> & {
+	readonly shader: HtmlInCanvasShader<TPassedProps>;
+	readonly effects: EffectsProp | null;
+	readonly effectsOutputSize: EffectsOutputSize | null;
+}) => {
+	const canvasRef = useRef<HTMLCanvasElement>(null);
+	const outputCanvasRef = useRef<HTMLCanvasElement>(null);
+	const inheritedPremountInSeconds = useContext(
+		Internals.DefaultPremountContext,
+	);
+	const canPremount = useMemo(() => Internals.canPremountInHtmlInCanvas(), []);
+	const canvasSubtreeStyle: React.CSSProperties = useMemo(() => {
+		return {
+			width: '100%',
+			height: '100%',
+			position: 'absolute',
+			top: 0,
+			left: 0,
+			right: 0,
+			bottom: 0,
+		};
+	}, []);
+	const outputCanvasStyle: React.CSSProperties = useMemo(() => {
+		return {
+			width: '100%',
+			height: '100%',
+			position: 'absolute',
+			top: 0,
+			left: 0,
+			right: 0,
+			bottom: 0,
+			pointerEvents: 'none',
+		};
+	}, []);
+
+	const captureCanvasRef = useRef<OffscreenCanvas | null>(null);
+	const captureContextRef = useRef<OffscreenCanvasRenderingContext2D | null>(
+		null,
+	);
+	const [shaderCanvas] = useState(() => new OffscreenCanvas(1, 1));
+
+	const passedPropsRef = useRef(passedProps);
+	passedPropsRef.current = passedProps;
+	const onUnmountRef = useRef(onUnmount);
+	onUnmountRef.current = onUnmount;
+
+	const memoizedEffects = Internals.useMemoizedEffects({
+		effects: effects ?? [],
+		overrideId: null,
+		runtimeValues: null,
+		videoConfigValues: null,
+	});
+
+	const effectsRef = useRef(memoizedEffects);
+	effectsRef.current = memoizedEffects;
+
+	const instanceRef = useRef<ReturnType<typeof shader> | null>(null);
+	const sequence = useContext(Internals.SequenceContext);
+	const premounting = Boolean(sequence?.premounting);
+	const inactive = premounting || Boolean(sequence?.postmounting);
+	const videoEnabled = Internals.useVideoEnabled();
+	// Audio-only frames keep the scenes mounted without capturing or drawing them.
+	const passThrough =
+		!videoEnabled ||
+		(bothEnteringAndExiting && presentationDirection === 'exiting');
+
+	useLayoutEffect(() => {
+		if (passThrough) {
+			return;
+		}
+
+		const canvas = canvasRef.current;
+		if (!canvas) {
+			return;
+		}
+
+		// Activity can reconnect effects while retaining the same DOM canvas.
+		let captureCanvas = transferredCanvases.get(canvas);
+		if (!captureCanvas) {
+			captureCanvas = canvas.transferControlToOffscreen();
+			transferredCanvases.set(canvas, captureCanvas);
+		}
+
+		const captureContext = captureCanvas.getContext('2d');
+		if (!captureContext) {
+			throw new Error('Failed to create capture canvas context');
+		}
+
+		const instance = shader(shaderCanvas);
+		instanceRef.current = instance;
+		captureCanvasRef.current = captureCanvas;
+		captureContextRef.current = captureContext;
+
+		return () => {
+			instance.cleanup();
+			instanceRef.current = null;
+			captureCanvasRef.current = null;
+			captureContextRef.current = null;
+		};
+	}, [passThrough, shader, shaderCanvas]);
+
+	const chainState = Internals.useEffectChainState(effectsOutputSize);
+	const {delayRender, continueRender, cancelRender} = useDelayRender();
+	const {isRendering} = useRemotionEnvironment();
+	const frame = useCurrentFrame();
+	// Like <HtmlInCanvas>, wait for a paint on every frame only while rendering.
+	const renderFrame = isRendering ? frame : null;
+
+	const draw: DrawFunction = useCallback(
+		async (prevImage, nextImage, progress) => {
+			const instance = instanceRef.current;
+			if (!instance) {
+				return;
+			}
+
+			const outputCanvas = outputCanvasRef.current;
+			if (!outputCanvas) {
+				throw new Error('Canvas not found');
+			}
+
+			const handle = delayRender('onPaint');
+			try {
+				const clearOutput = () => {
+					const context = outputCanvas.getContext('2d');
+					if (!context) {
+						throw new Error('Failed to create output canvas context');
+					}
+
+					context.clearRect(0, 0, outputCanvas.width, outputCanvas.height);
+				};
+
+				if (!prevImage && !nextImage) {
+					instance.clear();
+					clearOutput();
+					continueRender(handle);
+					return;
+				}
+
+				const width = prevImage?.width ?? nextImage?.width ?? 0;
+				const height = prevImage?.height ?? nextImage?.height ?? 0;
+
+				if (width === 0 || height === 0) {
+					instance.clear();
+					clearOutput();
+					continueRender(handle);
+					return;
+				}
+
+				shaderCanvas.width = width;
+				shaderCanvas.height = height;
+
+				instance.draw({
+					prevImage,
+					nextImage,
+					width,
+					height,
+					time: progress,
+					pixelRatio: width / (canvasRef.current?.clientWidth || width),
+					presentationDurationInFrames,
+					passedProps: passedPropsRef.current,
+				});
+
+				await Internals.runEffectChain({
+					state: chainState.get(width, height)!,
+					source: shaderCanvas,
+					effects: effectsRef.current ?? [],
+					width,
+					height,
+					output: outputCanvas,
+				});
+				continueRender(handle);
+			} catch (error) {
+				cancelRender(error);
+			}
+		},
+		[
+			cancelRender,
+			chainState,
+			continueRender,
+			delayRender,
+			presentationDurationInFrames,
+			shaderCanvas,
+		],
+	);
+
+	useLayoutEffect(() => {
+		if (passThrough) {
+			return;
+		}
+
+		const canvas = canvasRef.current;
+		if (!canvas) {
+			return;
+		}
+
+		if (canvas.getAttribute('content') !== 'drawable') {
+			canvas.setAttribute('content', 'drawable');
+		}
+
+		if (canvas.layoutSubtree !== true) {
+			canvas.layoutSubtree = true;
+		}
+
+		const firstChild = canvas.firstElementChild;
+		if (firstChild && !firstChild.hasAttribute('drawable')) {
+			firstChild.setAttribute('drawable', '');
+		}
+	});
+
+	useLayoutEffect(() => {
+		if (passThrough) {
+			return;
+		}
+
+		const canvas = canvasRef.current;
+		if (!canvas) {
+			throw new Error('Canvas not found');
+		}
+
+		const onPaint = () => {
+			const firstChild = canvas.firstElementChild;
+			const captureCanvas = captureCanvasRef.current;
+			const captureContext = captureContextRef.current;
+
+			if (!firstChild || !captureCanvas || !captureContext) {
+				return;
+			}
+
+			const elementImage = canvas.captureElementImage(firstChild);
+			try {
+				captureContext.reset();
+				captureContext.drawElementImage(elementImage, 0, 0);
+			} finally {
+				elementImage.close();
+			}
+
+			if (premounting) {
+				draw(captureCanvas, null, presentationProgress);
+			} else if (!inactive) {
+				onElementImage(captureCanvas, draw);
+			}
+		};
+
+		canvas.addEventListener('paint', onPaint);
+
+		return () => {
+			canvas.removeEventListener('paint', onPaint);
+		};
+	}, [
+		onElementImage,
+		presentationDirection,
+		presentationProgress,
+		draw,
+		passThrough,
+		inactive,
+		premounting,
+	]);
+
+	useLayoutEffect(() => {
+		if (passThrough) {
+			return;
+		}
+
+		const canvas = canvasRef.current;
+		if (!canvas) {
+			throw new Error('Canvas not found');
+		}
+
+		// Block capture before the paint event begins, so a frame is not taken
+		// from the previous scene image. draw() holds its own handle through async work.
+		const handle = delayRender('waiting for transition paint');
+		const onPainted = () => {
+			continueRender(handle);
+		};
+
+		canvas.addEventListener('paint', onPainted, {once: true});
+		canvas.requestPaint?.();
+
+		return () => {
+			canvas.removeEventListener('paint', onPainted);
+			onPainted();
+		};
+	}, [
+		presentationProgress,
+		shader,
+		onElementImage,
+		inactive,
+		passThrough,
+		memoizedEffects,
+		chainState,
+		renderFrame,
+		continueRender,
+		delayRender,
+	]);
+
+	useLayoutEffect(() => {
+		if (passThrough || inactive) {
+			return;
+		}
+
+		return () => {
+			onUnmountRef.current();
+		};
+	}, [passThrough, inactive]);
+
+	useLayoutEffect(() => {
+		if (passThrough) {
+			return;
+		}
+
+		const canvas = canvasRef.current;
+		if (!canvas) {
+			return;
+		}
+
+		// Size the canvas grid to match the device scale factor to prevent blurriness.
+		const observer = new ResizeObserver(([entry]) => {
+			const outputCanvas = outputCanvasRef.current;
+			const captureCanvas = captureCanvasRef.current;
+			if (!outputCanvas || !captureCanvas) {
+				return;
+			}
+
+			const width = entry.devicePixelContentBoxSize[0].inlineSize;
+			const height = entry.devicePixelContentBoxSize[0].blockSize;
+			captureCanvas.width = width;
+			captureCanvas.height = height;
+			outputCanvas.width = width;
+			outputCanvas.height = height;
+			canvas.requestPaint?.();
+		});
+		observer.observe(canvas, {box: 'device-pixel-content-box'});
+
+		return () => {
+			observer.disconnect();
+		};
+	}, [passThrough]);
+
+	if (passThrough) {
+		return children;
+	}
+
+	return (
+		<AbsoluteFill showInTimeline={false}>
+			<canvas
+				ref={canvasRef}
+				style={{...canvasSubtreeStyle, visibility: 'hidden'}}
+			>
+				{/* Keep the drawable element mounted while async children load. */}
+				<Internals.DefaultPremountContext.Provider
+					value={canPremount ? inheritedPremountInSeconds : 0}
+				>
+					<div style={{...canvasSubtreeStyle, visibility: 'visible'}}>
+						{children}
+					</div>
+				</Internals.DefaultPremountContext.Provider>
+			</canvas>
+			<canvas ref={outputCanvasRef} style={outputCanvasStyle} />
+		</AbsoluteFill>
+	);
+};
+
+export const HtmlInCanvasPresentation = <
+	TPassedProps extends Record<string, unknown>,
+>(
+	props: TransitionPresentationComponentProps<TPassedProps> & {
+		readonly shader: HtmlInCanvasShader<TPassedProps>;
+		readonly effects: EffectsProp | null;
+		readonly effectsOutputSize: EffectsOutputSize | null;
+	},
+) => {
+	const {isRendering} = useRemotionEnvironment();
+	if (!HtmlInCanvas.isSupported()) {
+		if (isRendering) {
+			throw new Error(getHtmlInCanvasUnsupportedMessage());
+		}
+
+		const visible =
+			props.presentationDirection === 'entering'
+				? props.presentationProgress >= 0.5
+				: props.presentationProgress < 0.5;
+		return (
+			<Internals.HtmlInCanvasFallback
+				label="Transition is not visible"
+				style={{
+					position: 'absolute',
+					inset: 0,
+					visibility: visible ? 'visible' : 'hidden',
+				}}
+			>
+				{props.children}
+			</Internals.HtmlInCanvasFallback>
+		);
+	}
+
+	return <HtmlInCanvasPresentationWithSupport {...props} />;
+};
+
+export type HtmlInCanvasShaderDrawParams<Props> = {
+	prevImage: OffscreenCanvas | null;
+	nextImage: OffscreenCanvas | null;
+	width: number;
+	height: number;
+	time: number;
+	/** Captured pixels per CSS pixel. */
+	pixelRatio: number;
+	/** Duration of the transition, independent of its current progress. */
+	presentationDurationInFrames: number;
+	passedProps: Props;
+};
+
+export type HtmlInCanvasShaderDraw<Props> = (
+	params: HtmlInCanvasShaderDrawParams<Props>,
+) => void;
+
+export type HtmlInCanvasShader<Props> = (canvas: OffscreenCanvas) => {
+	clear: () => void;
+	cleanup: () => void;
+	draw: HtmlInCanvasShaderDraw<Props>;
+};
+
+export const makeHtmlInCanvasPresentation = <
+	TPassedProps extends Record<string, unknown>,
+>(
+	shader: HtmlInCanvasShader<TPassedProps>,
+) => {
+	type AugmentedProps = TPassedProps & {
+		effects?: EffectsProp;
+		effectsOutputSize?: EffectsOutputSize;
+	};
+	const CompWithShader: React.FC<
+		TransitionPresentationComponentProps<AugmentedProps>
+	> = (props) => {
+		const {passedProps, ...otherProps} = props;
+		const {effects, effectsOutputSize, ...restPassedProps} = props.passedProps;
+		return (
+			<HtmlInCanvasPresentation
+				shader={shader}
+				passedProps={restPassedProps as TPassedProps}
+				effects={effects ?? null}
+				effectsOutputSize={effectsOutputSize ?? null}
+				{...otherProps}
+			/>
+		);
+	};
+
+	return (props: AugmentedProps): TransitionPresentation<AugmentedProps> => {
+		return {
+			component: CompWithShader,
+			props,
+			canvas: shader,
+		};
+	};
+};

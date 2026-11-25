@@ -1,0 +1,53 @@
+import type {AnyRemotionOption} from './option';
+
+const cliFlag = 'audio-bitrate' as const;
+
+let audioBitrate: string | null = null;
+
+export const audioBitrateOption = {
+	name: 'Audio bitrate',
+	addedIn: '3.2.32',
+	cliFlag,
+	description: () => (
+		<>
+			Specify the target bitrate for the generated audio. For server-side
+			renders, the syntax for FFmpeg{"'"}s <code>-b:a</code> parameter should be
+			used. FFmpeg may encode the audio in a way that will not result in the
+			exact audio bitrate specified. Example values: <code>512K</code> for 512
+			kbps, <code>1M</code> for 1 Mbps. Default for server-side renders:{' '}
+			<code>320k</code>.
+			<br />
+			<a href="/docs/web-renderer/render-media-on-web#audiobitrate">
+				<code>renderMediaOnWeb()</code>
+			</a>{' '}
+			instead accepts a number in bits per second or a quality preset.
+		</>
+	),
+	ssrName: 'audioBitrate',
+	docLink: 'https://www.remotion.dev/docs/options/audio-bitrate',
+	type: '0' as string,
+	getValue: ({commandLine}) => {
+		if (commandLine[cliFlag]) {
+			return {
+				value: commandLine[cliFlag] as string,
+				source: 'cli',
+			};
+		}
+
+		if (audioBitrate) {
+			return {
+				value: audioBitrate,
+				source: 'config file',
+			};
+		}
+
+		return {
+			value: null,
+			source: 'default',
+		};
+	},
+	setConfig: (value: string | null) => {
+		audioBitrate = value;
+	},
+	id: cliFlag,
+} satisfies AnyRemotionOption<string | null>;

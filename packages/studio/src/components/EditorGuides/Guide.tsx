@@ -1,0 +1,272 @@
+import {memo, useCallback, useContext, useEffect, useMemo, useRef} from 'react';
+import {NoReactInternals} from 'remotion/no-react';
+import {
+	getEditorGuideColor,
+	isGuidePointerUpAClick,
+	type GuidePointerDownPosition,
+} from '../../helpers/editor-guide-selection';
+import {observeHover} from '../../helpers/observe-hover';
+import {
+	isPointerSessionRelease,
+	startCapturedPointerSession,
+} from '../../helpers/pointer-session';
+import type {Guide} from '../../state/editor-guides';
+import {
+	EditorShowGuidesContext,
+	persistGuidesList,
+} from '../../state/editor-guides';
+import {RULER_WIDTH} from '../../state/editor-rulers';
+import {ContextMenu} from '../ContextMenu';
+import {stopForcingSpecificCursor} from '../ForceSpecificCursor';
+import type {ComboboxValue} from '../NewComposition/ComboBox';
+import {PREVENT_CLEAR_SELECTION_ON_POINTER_DOWN_ATTR} from '../Timeline/should-clear-selection-on-pointer-down';
+import {useTimelineGuideSelection} from '../Timeline/TimelineSelection';
+import {useRemoveGuide} from './use-remove-guide';
+
+const PADDING_FOR_EASY_DRAG = 4;
+
+const GuideComp: React.FC<{
+	guide: Guide;
+	canvasDimensions: {
+		left: number;
+		top: number;
+		width: number;
+		height: number;
+	};
+	scale: number;
+}> = ({guide, canvasDimensions, scale}) => {
+	const {
+		shouldCreateGuideRef,
+		shouldDeleteGuideRef,
+		setGuidesList,
+		setDraggingGuideId,
+		setHoveredGuideId,
+		hoveredGuideId,
+		draggingGuideId,
+		moveGuidePointerRef,
+	} = useContext(EditorShowGuidesContext);
+	const {onSelect, selected} = useTimelineGuideSelection(guide.id);
+	const pointerDownPositionRef = useRef<GuidePointerDownPosition | null>(null);
+	const removeGuide = useRemoveGuide();
+	const hasMovedGuideRef = useRef(false);
+	const guideRef = useRef<HTMLDivElement>(null);
+
+	useEffect(() => {
+		const element = guideRef.current;
+		if (!element) return;
+
+		const setHovered = (hovered: boolean) => {
+			setHoveredGuideId((current) =>
+				hovered ? guide.id : current === guide.id ? null : current,
+			);
+		};
+
+		const stop = observeHover({element, onHoverChange: setHovered});
+		return () => {
+			stop();
+			setHovered(false);
+		};
+	}, [guide.id, setHoveredGuideId]);
+
+	const isVerticalGuide = guide.orientation === 'vertical';
+
+	const guideStyle: React.CSSProperties = useMemo(() => {
+		const canvasPosition = isVerticalGuide
+			? canvasDimensions.left
+			: canvasDimensions.top;
+		const guidePosition = guide.position * scale + canvasPosition;
+		return {
+			position: 'absolute',
+			width: `${isVerticalGuide ? '1px' : '100%'}`,
+			height: `${isVerticalGuide ? '100%' : '1px'}`,
+			left: `${isVerticalGuide ? guidePosition - PADDING_FOR_EASY_DRAG : 0}px`,
+			top: `${isVerticalGuide ? 0 : guidePosition - PADDING_FOR_EASY_DRAG}px`,
+			cursor: `${isVerticalGuide ? 'ew-resize' : 'ns-resize'}`,
+			padding: isVerticalGuide
+				? `0 ${PADDING_FOR_EASY_DRAG}px`
+				: `${PADDING_FOR_EASY_DRAG}px 0`,
+		};
+	}, [guide, scale, canvasDimensions, isVerticalGuide]);
+
+	const guideContentStyle: React.CSSProperties = useMemo(() => {
+		return {
+			position: 'relative',
+			minWidth: `${isVerticalGuide ? '1px' : `calc(100% + ${RULER_WIDTH}px`}`,
+			minHeight: `${isVerticalGuide ? `calc(100% + ${RULER_WIDTH}px` : '1px'}`,
+			top: `${isVerticalGuide ? `-${RULER_WIDTH}px` : '0px'}`,
+			left: `${isVerticalGuide ? '0px' : `-${RULER_WIDTH}px`}`,
+			display: guide.show ? 'block' : 'none',
+			backgroundColor: getEditorGuideColor({
+				selected,
+				active: hoveredGuideId === guide.id || draggingGuideId === guide.id,
+			}),
+		};
+	}, [
+		isVerticalGuide,
+		guide.show,
+		hoveredGuideId,
+		guide.id,
+		selected,
+		draggingGuideId,
+	]);
+
+	const updateHasMovedGuide = useCallback(
+		(clientX: number, clientY: number) => {
+			const pointerDownPosition = pointerDownPositionRef.current;
+			if (pointerDownPosition === null) {
+				return;
+			}
+
+			if (
+				!isGuidePointerUpAClick({
+					pointerDownPosition,
+					guideId: guide.id,
+					clientX,
+					clientY,
+				})
+			) {
+				hasMovedGuideRef.current = true;
+			}
+		},
+		[guide.id],
+	);
+
+	const finishGuideInteraction = useCallback(() => {
+		const shouldDeleteGuide = shouldDeleteGuideRef.current;
+
+		if (shouldDeleteGuide) {
+			removeGuide(guide.id);
+		} else {
+			setGuidesList((guides) => {
+				persistGuidesList(guides);
+				return guides;
+			});
+		}
+
+		shouldDeleteGuideRef.current = false;
+		shouldCreateGuideRef.current = false;
+		stopForcingSpecificCursor();
+		setDraggingGuideId(() => null);
+	}, [
+		guide.id,
+		removeGuide,
+		setDraggingGuideId,
+		setGuidesList,
+		shouldCreateGuideRef,
+		shouldDeleteGuideRef,
+	]);
+
+	const onPointerDown = useCallback(
+		(e: React.PointerEvent<HTMLDivElement>) => {
+			if (e.button !== 0) {
+				return;
+			}
+
+			e.preventDefault();
+			e.stopPropagation();
+			hasMovedGuideRef.current = false;
+			pointerDownPositionRef.current = {
+				guideId: guide.id,
+				clientX: e.clientX,
+				clientY: e.clientY,
+			};
+			shouldCreateGuideRef.current = false;
+			setDraggingGuideId(() => guide.id);
+
+			startCapturedPointerSession({
+				event: e.nativeEvent,
+				captureTarget: e.currentTarget,
+				onMove: (moveEvent) => {
+					updateHasMovedGuide(moveEvent.clientX, moveEvent.clientY);
+					moveGuidePointerRef.current?.(moveEvent);
+				},
+				onEnd: (reason, endEvent) => {
+					const pointerDownPosition = pointerDownPositionRef.current;
+					pointerDownPositionRef.current = null;
+					const shouldDeleteGuide = shouldDeleteGuideRef.current;
+					finishGuideInteraction();
+					if (shouldDeleteGuide || !isPointerSessionRelease(reason, endEvent)) {
+						return;
+					}
+
+					if (
+						isGuidePointerUpAClick({
+							pointerDownPosition,
+							guideId: guide.id,
+							clientX: endEvent.clientX,
+							clientY: endEvent.clientY,
+						})
+					) {
+						onSelect();
+					}
+				},
+			});
+		},
+		[
+			finishGuideInteraction,
+			guide.id,
+			moveGuidePointerRef,
+			onSelect,
+			setDraggingGuideId,
+			shouldCreateGuideRef,
+			shouldDeleteGuideRef,
+			updateHasMovedGuide,
+		],
+	);
+
+	const onClick = useCallback(
+		(e: React.MouseEvent<HTMLDivElement, MouseEvent>) => {
+			if (e.button !== 0) {
+				return;
+			}
+
+			e.preventDefault();
+			e.stopPropagation();
+		},
+		[],
+	);
+
+	const isActive = selected || hoveredGuideId === guide.id;
+	const activeClassName = isActive ? '__remotion_editor_guide_selected' : null;
+
+	const guideClassName = useMemo(() => {
+		return ['__remotion_editor_guide_content', activeClassName]
+			.filter(NoReactInternals.truthy)
+			.join(' ');
+	}, [activeClassName]);
+
+	const getContextMenuItems = useCallback((): ComboboxValue[] => {
+		return [
+			{
+				id: '1',
+				keyHint: null,
+				label: 'Remove guide',
+				leftItem: null,
+				onClick: () => {
+					removeGuide(guide.id);
+				},
+				quickSwitcherLabel: null,
+				subMenu: null,
+				type: 'item',
+				value: 'remove',
+			},
+		];
+	}, [guide.id, removeGuide]);
+
+	return (
+		<ContextMenu getItems={getContextMenuItems}>
+			<div
+				ref={guideRef}
+				style={guideStyle}
+				onPointerDown={onPointerDown}
+				onClick={onClick}
+				className="__remotion_editor_guide"
+				{...{[PREVENT_CLEAR_SELECTION_ON_POINTER_DOWN_ATTR]: 'true'}}
+			>
+				<div style={guideContentStyle} className={guideClassName} />
+			</div>
+		</ContextMenu>
+	);
+};
+
+export default memo(GuideComp);
