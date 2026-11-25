@@ -76,12 +76,12 @@ All 133 package manifests were parsed, including dependencies, dev/peer/optional
 dependencies, overrides and the root workspace catalog. **No direct GitHub URL
 or GitHub shorthand dependency occurs in those package manifest fields.**
 
-| Dependency | Source | Location |
-| --- | --- | --- |
-| `@remotion-dev/cube-presentation` (direct HTTP, not GitHub) | `https://www.remotion.pro/pkg/cube-transition/1.0.2/docs` | `packages/docs/package.json` |
-| `@electron/node-gyp` (transitive through `@electron/rebuild@3.7.2`) | `git+https://github.com/electron/node-gyp.git#06b29aafb7708acef8b3669835c8a7857ebc92d2`; lock shorthand `github:electron/node-gyp#06b29aa` | `bun.lock` |
-| `mp4` (Cargo Git) | `https://github.com/jonnyburger/mp4-rust`, rev `92ba375738cc2f05a4d754e1f968cf2e97d06641` | `packages/compositor/Cargo.toml`, `Cargo.lock` |
-| `ffmpeg-next` (optional FFmpeg binding helper, Cargo Git) | `https://github.com/zmwangx/rust-ffmpeg`, rev `a7b50dd5f909e071affffe238d434d184da30aee` | `packages/compositor/ffmpeg/build/Cargo.toml` |
+| Dependency                                                          | Source                                                                                                                                     | Location                                       |
+| ------------------------------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------ | ---------------------------------------------- |
+| `@remotion-dev/cube-presentation` (direct HTTP, not GitHub)         | `https://www.remotion.pro/pkg/cube-transition/1.0.2/docs`                                                                                  | `packages/docs/package.json`                   |
+| `@electron/node-gyp` (transitive through `@electron/rebuild@3.7.2`) | `git+https://github.com/electron/node-gyp.git#06b29aafb7708acef8b3669835c8a7857ebc92d2`; lock shorthand `github:electron/node-gyp#06b29aa` | `bun.lock`                                     |
+| `mp4` (Cargo Git)                                                   | `https://github.com/jonnyburger/mp4-rust`, rev `92ba375738cc2f05a4d754e1f968cf2e97d06641`                                                  | `packages/compositor/Cargo.toml`, `Cargo.lock` |
+| `ffmpeg-next` (optional FFmpeg binding helper, Cargo Git)           | `https://github.com/zmwangx/rust-ffmpeg`, rev `a7b50dd5f909e071affffe238d434d184da30aee`                                                   | `packages/compositor/ffmpeg/build/Cargo.toml`  |
 
 The compositor's primary `ffmpeg-next`/sys wrappers are local source dependencies.
 Go's versioned GitHub module names are normal Go module identities; go.work uses
@@ -93,15 +93,15 @@ were regenerated and no dependencies were vendored.
 Testing workflows are retained. No main-push workflow publishes packages, deploys
 docs, or declares upstream-only secrets. Lambda integration CI uses fake AWS.
 
-| Workflow | Trigger and standalone behavior |
-| --- | --- |
-| `push.yml` | Every `main` push and PR: broad install/lint/build/test matrix. Main selects full CI, including the first root commit. Potentially expensive; not disabled. |
-| `ffmpeg.yml` | Main push/PR when compositor FFmpeg paths, this YAML or CircleCI config change; also manual. Native FFmpeg builds/artifacts; no upstream secrets. Eligible on initial push. |
-| `copilot-setup-steps.yml` | Manual and push/PR changing this file: install/build, no upstream secrets. Eligible on initial push. |
-| `discord.yml` | Push and pull_request_target; existing official-repository condition skips its job here. Uses upstream DISCORD_WEBHOOK only in the official repo. |
-| `changelog.yml` | Published release/manual; upstream DISCORD_TOKEN. One added official-repository job guard skips it here. |
-| `claude.yml` | Issue/comment/review events containing @claude; needs CLAUDE_CODE_OAUTH_TOKEN. No main-push trigger; leave unused or disable until independently configured. |
-| `pullfrog.yml` | Manual external-agent workflow with write/OIDC permissions and optional provider keys; no main-push trigger. Leave unused or configure deliberately. |
+| Workflow                  | Trigger and standalone behavior                                                                                                                                             |
+| ------------------------- | --------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `push.yml`                | Every `main` push and PR: broad install/lint/build/test matrix. Main selects full CI, including the first root commit. Potentially expensive; not disabled.                 |
+| `ffmpeg.yml`              | Main push/PR when compositor FFmpeg paths, this YAML or CircleCI config change; also manual. Native FFmpeg builds/artifacts; no upstream secrets. Eligible on initial push. |
+| `copilot-setup-steps.yml` | Manual and push/PR changing this file: install/build, no upstream secrets. Eligible on initial push.                                                                        |
+| `discord.yml`             | Push and pull_request_target; existing official-repository condition skips its job here. Uses upstream DISCORD_WEBHOOK only in the official repo.                           |
+| `changelog.yml`           | Published release/manual; upstream DISCORD_TOKEN. One added official-repository job guard skips it here.                                                                    |
+| `claude.yml`              | Issue/comment/review events containing @claude; needs CLAUDE_CODE_OAUTH_TOKEN. No main-push trigger; leave unused or disable until independently configured.                |
+| `pullfrog.yml`            | Manual external-agent workflow with write/OIDC permissions and optional provider keys; no main-push trigger. Leave unused or configure deliberately.                        |
 
 CircleCI's FFmpeg pipeline is API-triggered only and requires a connected
 CircleCI project. No bulk workflow edits or test configuration removals were made.
@@ -110,7 +110,9 @@ GitHub. In particular upstream push.yml contains `parallel` step groups whose
 GitHub service support/acceptance is unverified. No CI success is claimed.
 
 Official publishing is blocked with a shared throwing guard, including direct
-script invocation. The root release shortcut no longer contains a tag push.
+script invocation. The safe `publish.ts --list` and `publish.ts --check`
+validation modes remain available; actual publication stops before release side
+effects. The root release shortcut no longer contains a tag push.
 The original official publishing implementations remain for reference, behind
 that guard. Generic user-facing Lambda/Cloud Run deployment APIs and template
 deploy examples remain available; they need the user's own accounts. Do not

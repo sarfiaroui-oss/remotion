@@ -1,4 +1,3 @@
-import './scripts/standalone-no-publish.cjs'; // Standalone: block official publishing and upstream writes.
 import {
 	copyFileSync,
 	existsSync,
@@ -43,6 +42,10 @@ if (
 	throw new Error(
 		'Usage: bun publish.ts [--list | --check [--only=<package>] | --tag=<dist-tag> [--only=<package>]]',
 	);
+}
+
+if (!listOnly && !checkOnly) {
+	await import('./scripts/standalone-no-publish.cjs');
 }
 
 const releaseVersion = JSON.parse(

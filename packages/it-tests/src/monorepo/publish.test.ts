@@ -10,6 +10,35 @@ import {
 import {tmpdir} from 'node:os';
 import path from 'node:path';
 
+test('Standalone publishing is blocked before release side effects', async () => {
+	const root = path.resolve(__dirname, '..', '..', '..', '..');
+	const fixture = mkdtempSync(
+		path.join(tmpdir(), 'remotion-publish-guard-test-'),
+	);
+
+	try {
+		for (const args of [[], ['--tag=standalone-test']]) {
+			const proc = Bun.spawn(
+				[process.execPath, path.join(root, 'publish.ts'), ...args],
+				{cwd: fixture, stdout: 'pipe', stderr: 'pipe'},
+			);
+			const [stdout, stderr, exitCode] = await Promise.all([
+				new Response(proc.stdout).text(),
+				new Response(proc.stderr).text(),
+				proc.exited,
+			]);
+
+			expect(exitCode).not.toBe(0);
+			expect(stdout).toBe('');
+			expect(stderr).toContain(
+				'Official release, publishing and upstream deployment tooling is disabled',
+			);
+		}
+	} finally {
+		rmSync(fixture, {recursive: true, force: true});
+	}
+});
+
 test('Publishing checks referenced LICENSE.md files in compiled and uncompiled archives', async () => {
 	const root = path.resolve(__dirname, '..', '..', '..', '..');
 	const fixture = mkdtempSync(path.join(tmpdir(), 'remotion-publish-test-'));

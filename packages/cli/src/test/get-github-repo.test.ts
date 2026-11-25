@@ -17,14 +17,21 @@ import {
 	normalizeGitRemoteUrl,
 } from '../get-github-repository';
 
-test('Get GitHub repo', () => {
+test('Read the configured Git origin', () => {
+	const expectedUrl = execFileSync(
+		'git',
+		['-C', __dirname, 'config', '--local', '--get', 'remote.origin.url'],
+		{encoding: 'utf8'},
+	).trim();
 	const gitConfig = getGitConfig(__dirname);
-	const origin = getGitRemoteOrigin(gitConfig as string);
-	expect(origin?.remote).toEqual('origin');
-	expect(
-		origin?.url === 'https://github.com/remotion-dev/remotion.git' ||
-			origin?.url === 'https://github.com/remotion-dev/remotion',
-	).toEqual(true);
+	if (!gitConfig) {
+		throw new Error('Expected a Git configuration for the current checkout');
+	}
+
+	expect(getGitRemoteOrigin(gitConfig)).toEqual({
+		remote: 'origin',
+		url: expectedUrl,
+	});
 });
 
 test('Should normalize SSH URLs', () => {
